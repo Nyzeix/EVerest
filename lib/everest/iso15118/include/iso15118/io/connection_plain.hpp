@@ -12,7 +12,7 @@ namespace iso15118::io {
 class ConnectionPlain : public IConnection {
 public:
     ConnectionPlain(PollManager&, const std::string& interface_name);
-    ConnectionPlain(PollManager&, int connected_fd);
+    ConnectionPlain(PollManager&, int connected_fd, const std::optional<sha512_hash_t>&);
 
     void set_event_callback(const ConnectionEventCallback&) final;
     Ipv6EndPoint get_public_endpoint() const final;
@@ -22,8 +22,8 @@ public:
 
     void close() final;
 
-    std::optional<sha512_hash_t> get_vehicle_cert_hash() const final {
-        return std::nullopt;
+    [[nodiscard]] std::optional<sha512_hash_t> get_vehicle_cert_hash() const final {
+        return vehicle_cert_hash;
     }
 
     ~ConnectionPlain();
@@ -38,6 +38,8 @@ private:
     bool connection_open{false};
 
     ConnectionEventCallback event_callback{nullptr};
+
+    std::optional<sha512_hash_t> vehicle_cert_hash{std::nullopt};
 
     void handle_connect();
     void handle_data();
