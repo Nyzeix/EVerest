@@ -1322,6 +1322,18 @@ const ComponentVariable StopTransactionIfUnlockNotSupported = {
         "StopTransactionIfUnlockNotSupported",
     }),
 };
+const ComponentVariable RejectRemoteStartTransactionWithoutConnectorId = {
+    ControllerComponents::OCPP16LegacyCtrlr,
+    std::optional<Variable>({
+        "RejectRemoteStartTransactionWithoutConnectorId",
+    }),
+};
+const ComponentVariable RemoteStartTransactionWithoutConnectorIdFindFirst = {
+    ControllerComponents::OCPP16LegacyCtrlr,
+    std::optional<Variable>({
+        "RemoteStartTransactionWithoutConnectorIdFindFirst",
+    }),
+};
 const ComponentVariable MeterPublicKeys = {
     ControllerComponents::OCPP16LegacyCtrlr,
     std::optional<Variable>({
@@ -1535,6 +1547,7 @@ ComponentVariable get_component_variable(const std::int32_t evse_id, const Varia
 namespace DERComponentVariables {
 
 const Variable Available = {"Available"};
+const Variable Enabled = {"Enabled"};
 const Variable ModesSupported = {"ModesSupported"};
 
 ComponentVariable get_dc_component_variable(const std::int32_t evse_id, const Variable& variable) {

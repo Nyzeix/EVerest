@@ -338,6 +338,8 @@ extern const ComponentVariable AllowChargingProfileWithoutStartSchedule;
 extern const ComponentVariable WaitForStopTransactionsOnResetTimeout;
 extern const ComponentVariable SwitchSecurityProfileConnectionTimeout;
 extern const ComponentVariable StopTransactionIfUnlockNotSupported;
+extern const ComponentVariable RejectRemoteStartTransactionWithoutConnectorId;
+extern const ComponentVariable RemoteStartTransactionWithoutConnectorIdFindFirst;
 extern const ComponentVariable MeterPublicKeys;
 extern const ComponentVariable DisableSecurityEventNotifications;
 extern const ComponentVariable ISO15118CertificateManagementEnabled;
@@ -452,6 +454,7 @@ void clear_slot_in_device_model(DeviceModelInterface& dm, int32_t slot);
 
 namespace DERComponentVariables {
 extern const Variable Available;
+extern const Variable Enabled;
 extern const Variable ModesSupported;
 ComponentVariable get_dc_component_variable(const std::int32_t evse_id, const Variable& variable);
 ComponentVariable get_ac_component_variable(const std::int32_t evse_id, const Variable& variable);
