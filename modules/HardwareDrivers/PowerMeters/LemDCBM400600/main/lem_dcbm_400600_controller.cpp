@@ -339,12 +339,16 @@ LemDCBM400600Controller::transaction_start_request_to_dcbm_payload(const types::
     std::string client_id = request.identification_data.value_or("") + ',' + request.transaction_id;
     const int max_length_client_id = 37; // as defined by LEM documentation
     client_id = (client_id.length() > max_length_client_id) ? client_id.substr(0, max_length_client_id) : client_id;
+    std::string tariff_text = request.tariff_text.value_or("");
+    const int max_length_tariff_text = 20; // as defined by LEM documentation
+    tariff_text =
+        (tariff_text.length() > max_length_tariff_text) ? tariff_text.substr(0, max_length_tariff_text) : tariff_text;
     if (this->v2_capable) {
         return nlohmann::ordered_json{{"evseId", request.evse_id},
                                       {"transactionId", request.transaction_id},
                                       {"clientId", client_id},
                                       {"tariffId", this->config.tariff_id},
-                                      {"TT", request.tariff_text.value_or("")},
+                                      {"TT", tariff_text},
                                       {"UV", this->config.UV},
                                       {"UD", this->config.UD},
                                       {"cableId", this->config.cable_id},
