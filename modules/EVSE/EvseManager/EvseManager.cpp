@@ -417,6 +417,7 @@ void EvseManager::ready() {
 
         r_hlc[0]->subscribe_ac_close_contactor([this] {
             session_log.car(true, "AC HLC Close contactor");
+            EVLOG_info << "Received AC contactor close request from HLC; enabling HLC contactor permission";
             charger->set_hlc_allow_close_contactor(true);
         });
 
@@ -1157,6 +1158,7 @@ void EvseManager::ready() {
 
             if (event == CPEvent::PowerOn) {
                 contactor_open = false;
+                EVLOG_info << "BSP reported PowerOn; forwarding AC contactor closed=true to HLC";
                 r_hlc[0]->call_ac_contactor_closed(true);
             }
 
@@ -1164,6 +1166,7 @@ void EvseManager::ready() {
                 contactor_open = true;
                 latest_target_voltage = 0;
                 latest_target_current = 0;
+                EVLOG_info << "BSP reported PowerOff; forwarding AC contactor closed=false to HLC";
                 r_hlc[0]->call_ac_contactor_closed(false);
             }
         }

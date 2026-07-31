@@ -4,6 +4,8 @@
 
 #include "../states.hpp"
 
+#include <chrono>
+
 #include <iso15118/message/power_delivery.hpp>
 #include <optional>
 
@@ -20,6 +22,7 @@ private:
     float present_voltage{0};
     bool ac_connector_closed{false};
     std::optional<message_20::PowerDeliveryRequest> previous_req;
+    std::optional<std::chrono::steady_clock::time_point> contactor_close_request_time;
 };
 
 } // namespace iso15118::d20::state

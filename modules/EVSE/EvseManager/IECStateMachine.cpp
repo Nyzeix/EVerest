@@ -419,6 +419,7 @@ void IECStateMachine::call_allow_power_on_bsp(bool value) {
         power_on_allowed = false;
         power_on_reason = types::evse_board_support::Reason::PowerOff;
     }
+    EVLOG_info << "Requesting BSP allow_power_on=" << (value ? "true" : "false");
     r_bsp->call_allow_power_on({value, power_on_reason});
 }
 

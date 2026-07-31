@@ -2067,6 +2067,7 @@ void Charger::set_hlc_charging_active() {
 void Charger::set_hlc_allow_close_contactor(bool on) {
     Everest::scoped_lock_timeout lock(state_machine_mutex,
                                       Everest::MutexDescription::Charger_set_hlc_allow_close_contactor);
+    EVLOG_info << "HLC contactor close permission set to " << (on ? "true" : "false");
     shared_context.hlc_allow_close_contactor = on;
 }
 

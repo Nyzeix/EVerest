@@ -35,6 +35,85 @@ static void log_packet_from_car(const iso15118::io::SdpPacket& packet, session::
                packet.get_payload_length(), session::logging::ExiMessageDirection::FROM_EV);
 }
 
+static const char* message_type_to_string(const message_20::Type type) {
+    using Type = message_20::Type;
+
+    switch (type) {
+    case Type::None:
+        return "None";
+    case Type::SupportedAppProtocolReq:
+        return "SupportedAppProtocolReq";
+    case Type::SupportedAppProtocolRes:
+        return "SupportedAppProtocolRes";
+    case Type::SessionSetupReq:
+        return "SessionSetupReq";
+    case Type::SessionSetupRes:
+        return "SessionSetupRes";
+    case Type::AuthorizationSetupReq:
+        return "AuthorizationSetupReq";
+    case Type::AuthorizationSetupRes:
+        return "AuthorizationSetupRes";
+    case Type::AuthorizationReq:
+        return "AuthorizationReq";
+    case Type::AuthorizationRes:
+        return "AuthorizationRes";
+    case Type::ServiceDiscoveryReq:
+        return "ServiceDiscoveryReq";
+    case Type::ServiceDiscoveryRes:
+        return "ServiceDiscoveryRes";
+    case Type::ServiceDetailReq:
+        return "ServiceDetailReq";
+    case Type::ServiceDetailRes:
+        return "ServiceDetailRes";
+    case Type::ServiceSelectionReq:
+        return "ServiceSelectionReq";
+    case Type::ServiceSelectionRes:
+        return "ServiceSelectionRes";
+    case Type::DC_ChargeParameterDiscoveryReq:
+        return "DC_ChargeParameterDiscoveryReq";
+    case Type::DC_ChargeParameterDiscoveryRes:
+        return "DC_ChargeParameterDiscoveryRes";
+    case Type::ScheduleExchangeReq:
+        return "ScheduleExchangeReq";
+    case Type::ScheduleExchangeRes:
+        return "ScheduleExchangeRes";
+    case Type::DC_CableCheckReq:
+        return "DC_CableCheckReq";
+    case Type::DC_CableCheckRes:
+        return "DC_CableCheckRes";
+    case Type::DC_PreChargeReq:
+        return "DC_PreChargeReq";
+    case Type::DC_PreChargeRes:
+        return "DC_PreChargeRes";
+    case Type::PowerDeliveryReq:
+        return "PowerDeliveryReq";
+    case Type::PowerDeliveryRes:
+        return "PowerDeliveryRes";
+    case Type::DC_ChargeLoopReq:
+        return "DC_ChargeLoopReq";
+    case Type::DC_ChargeLoopRes:
+        return "DC_ChargeLoopRes";
+    case Type::DC_WeldingDetectionReq:
+        return "DC_WeldingDetectionReq";
+    case Type::DC_WeldingDetectionRes:
+        return "DC_WeldingDetectionRes";
+    case Type::SessionStopReq:
+        return "SessionStopReq";
+    case Type::SessionStopRes:
+        return "SessionStopRes";
+    case Type::AC_ChargeParameterDiscoveryReq:
+        return "AC_ChargeParameterDiscoveryReq";
+    case Type::AC_ChargeParameterDiscoveryRes:
+        return "AC_ChargeParameterDiscoveryRes";
+    case Type::AC_ChargeLoopReq:
+        return "AC_ChargeLoopReq";
+    case Type::AC_ChargeLoopRes:
+        return "AC_ChargeLoopRes";
+    }
+
+    return "Unknown";
+}
+
 static std::unique_ptr<message_20::Variant> make_variant_from_packet(const iso15118::io::SdpPacket& packet) {
     return std::make_unique<message_20::Variant>(
         packet.get_payload_type(), io::StreamInputView{packet.get_payload_buffer(), packet.get_payload_length()});
@@ -208,11 +287,16 @@ TimePoint const& Session::poll() {
         // FIXME (aw): this event loop only acts on new packets, seems to be enough for now ...
         log_packet_from_car(packet, log);
 
+        const auto request_payload_size = packet.get_payload_length();
         message_exchange.set_request(make_variant_from_packet(packet));
 
         packet = {}; // reset the packet
 
         const auto request_msg_type = ctx.peek_request_type();
+
+        logf_info("Received V2G message: %s (type=%u, payload_size=%zu)",
+                message_type_to_string(request_msg_type), static_cast<unsigned int>(request_msg_type),
+                request_payload_size);
 
         // There is no sequence timer before SupportedAppProtocol
         if (request_msg_type != message_20::Type::SupportedAppProtocolReq) {
@@ -277,6 +361,9 @@ void Session::send_response() {
         return;
     }
     const auto response_size = setup_response_header(response_buffer, stored_payload_type, payload_size);
+    logf_info("Sending V2G message: %s (type=%u, payload_size=%zu)",
+              message_type_to_string(stored_response_type), static_cast<unsigned int>(stored_response_type),
+              payload_size);
     connection->write(response_buffer, response_size);
     last_response_tx_time = get_current_time_point();
 

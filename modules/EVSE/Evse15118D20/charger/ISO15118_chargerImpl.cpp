@@ -510,6 +510,7 @@ iso15118::session::feedback::Callbacks ISO15118_chargerImpl::create_callbacks() 
             publish_dc_open_contactor(nullptr);
             break;
         case Signal::AC_CLOSE_CONTACTOR:
+            EVLOG_info << "ISO 15118 requested AC contactor close; publishing request to EvseManager";
             publish_ac_close_contactor(nullptr);
             break;
         case Signal::AC_OPEN_CONTACTOR:
@@ -829,6 +830,7 @@ void ISO15118_chargerImpl::handle_authorization_response(
 
 void ISO15118_chargerImpl::handle_ac_contactor_closed(bool& status) {
     std::scoped_lock lock(GEL);
+    EVLOG_info << "EvseManager reported AC contactor closed status: " << (status ? "true" : "false");
     if (controller) {
         controller->send_control_event(iso15118::d20::ClosedContactor{status});
     }

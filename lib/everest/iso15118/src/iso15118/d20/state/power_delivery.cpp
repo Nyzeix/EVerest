@@ -50,7 +50,16 @@ Result PowerDelivery::feed(Event ev) {
         if (const auto* control_data = m_ctx.get_control_event<PresentVoltageCurrent>()) {
             present_voltage = control_data->voltage;
         } else if (const auto* control_data = m_ctx.get_control_event<ClosedContactor>()) {
-            ac_connector_closed = control_data;
+            ac_connector_closed = static_cast<bool>(*control_data);
+
+            const auto contactor_elapsed_ms = contactor_close_request_time.has_value()
+                                                  ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                        std::chrono::steady_clock::now() -
+                                                        contactor_close_request_time.value())
+                                                        .count()
+                                                  : -1;
+            logf_info("PowerDelivery: received ClosedContactor(%s) after %lld ms",
+                      ac_connector_closed ? "true" : "false", static_cast<long long>(contactor_elapsed_ms));
 
             if (not ac_connector_closed) {
                 logf_warning(
@@ -66,6 +75,8 @@ Result PowerDelivery::feed(Event ev) {
             }
 
             const auto& res = handle_request(previous_req.value(), m_ctx.session, false);
+            logf_info("PowerDelivery: prepared PowerDeliveryRes after contactor confirmation (response_code=%u)",
+                      static_cast<unsigned int>(res.response_code));
             m_ctx.respond(res);
 
             if (res.response_code >= dt::ResponseCode::FAILED) {
@@ -85,6 +96,9 @@ Result PowerDelivery::feed(Event ev) {
             // TODO(SL): Check if value_or is the correct way
             const auto& res =
                 handle_request(previous_req.value_or(message_20::PowerDeliveryRequest{}), m_ctx.session, true);
+            logf_warning("PowerDelivery: contactor confirmation timeout; prepared PowerDeliveryRes "
+                         "with response_code=%u",
+                         static_cast<unsigned int>(res.response_code));
             m_ctx.respond(res);
             m_ctx.session_stopped = true;
         }
@@ -111,6 +125,11 @@ Result PowerDelivery::feed(Event ev) {
 
         return {};
     } else if (const auto req = variant->get_if<message_20::PowerDeliveryRequest>()) {
+        logf_info("PowerDeliveryReq received (charge_progress=%u, processing=%u, ac_charger=%s, "
+                  "contactor_closed=%s)",
+                  static_cast<unsigned int>(req->charge_progress), static_cast<unsigned int>(req->processing),
+                  m_ctx.session.is_ac_charger() ? "true" : "false", ac_connector_closed ? "true" : "false");
+
         if (req->charge_progress == dt::Progress::Start) {
             m_ctx.feedback.signal(session::feedback::Signal::SETUP_FINISHED);
         }
@@ -120,6 +139,9 @@ Result PowerDelivery::feed(Event ev) {
             // Save req
             previous_req = *req;
             // Close the AC contactor so that charging can start
+            contactor_close_request_time = std::chrono::steady_clock::now();
+            logf_info("PowerDelivery: requesting AC contactor close; waiting for ClosedContactor(true) before "
+                      "sending PowerDeliveryRes");
             m_ctx.feedback.signal(session::feedback::Signal::AC_CLOSE_CONTACTOR);
             m_ctx.start_timeout(d20::TimeoutType::CONTACTOR, 3000);
             logf_info("Waiting for contactor is closed");
@@ -128,6 +150,8 @@ Result PowerDelivery::feed(Event ev) {
 
         const auto& res = handle_request(*req, m_ctx.session, false);
 
+        logf_info("PowerDelivery: prepared PowerDeliveryRes immediately (response_code=%u)",
+                  static_cast<unsigned int>(res.response_code));
         m_ctx.respond(res);
 
         if (res.response_code >= dt::ResponseCode::FAILED) {
