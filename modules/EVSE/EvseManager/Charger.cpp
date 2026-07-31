@@ -1181,6 +1181,20 @@ void Charger::process_cp_events_state(CPEvent cp_event) {
         }
         break;
 
+    case EvseState::T_step_X1:
+        if (cp_event == CPEvent::CarRequestedPower) {
+            if (internal_context.t_step_X1_return_state == EvseState::PrepareCharging) {
+                EVLOG_info << "CarRequestedPower received during AC fallback T_step_X1; resuming PrepareCharging";
+                shared_context.iec_allow_close_contactor = true;
+                shared_context.current_state = EvseState::PrepareCharging;
+            } else {
+                EVLOG_warning << "CarRequestedPower received during T_step_X1 recovery; keeping recovery state";
+            }
+        } else if (cp_event == CPEvent::CarRequestedStopPower) {
+            shared_context.iec_allow_close_contactor = false;
+        }
+        break;
+
     case EvseState::ChargingPausedEV:
         if (cp_event == CPEvent::CarRequestedPower) {
             shared_context.iec_allow_close_contactor = true;
