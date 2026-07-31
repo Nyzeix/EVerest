@@ -232,6 +232,11 @@ std::queue<CPEvent> IECStateMachine::state_machine(std::optional<RawCPState> con
                 EVLOG_info << "Detected simplified mode.";
                 ev_simplified_mode = true;
             } else if (last_cp_state == RawCPState::B) {
+                EVLOG_info << "IEC CP transition B->C: queueing CarRequestedPower (pwm_running="
+                           << (pwm_running ? "true" : "false") << ", power_on_allowed="
+                           << (power_on_allowed ? "true" : "false") << ", last_power_on_allowed="
+                           << (last_power_on_allowed ? "true" : "false") << ", last_pwm_running="
+                           << (last_pwm_running ? "true" : "false") << ")";
                 events.push(CPEvent::CarRequestedPower);
             }
 
@@ -249,7 +254,11 @@ std::queue<CPEvent> IECStateMachine::state_machine(std::optional<RawCPState> con
                 // If we resume charging and the EV never left state C during pause we allow non-compliant EVs to switch
                 // on again.
                 if (power_on_allowed) {
+                    EVLOG_info << "IEC CP state C: PWM became active and power_on_allowed=true; requesting BSP power on";
                     call_allow_power_on_bsp(true);
+                } else {
+                    EVLOG_warning << "IEC CP state C: PWM became active but power_on_allowed=false; BSP power-on "
+                                     "request is blocked";
                 }
             }
 
@@ -265,10 +274,21 @@ std::queue<CPEvent> IECStateMachine::state_machine(std::optional<RawCPState> con
                 // 1) When we come from state B: switch on if we are allowed to
                 // 2) When we are in C2 for a while now and finally get a delayed power_on_allowed: also switch on
 
+                if (last_cp_state == RawCPState::B) {
+                    EVLOG_info << "IEC CP B->C power-on gate (pwm_running=" << (pwm_running ? "true" : "false")
+                               << ", power_on_allowed=" << (power_on_allowed ? "true" : "false")
+                               << ", last_power_on_allowed=" << (last_power_on_allowed ? "true" : "false")
+                               << ")";
+                }
+
                 if (power_on_allowed && (!last_power_on_allowed || last_cp_state == RawCPState::B)) {
                     // Table A.6: Sequence 4 EV ready to charge.
                     // Must enable power within 3 seconds.
                     call_allow_power_on_bsp(true);
+                } else if (last_cp_state == RawCPState::B) {
+                    EVLOG_warning << "IEC CP B->C power-on gate blocked (pwm_running=true, power_on_allowed="
+                                  << (power_on_allowed ? "true" : "false") << ", last_power_on_allowed="
+                                  << (last_power_on_allowed ? "true" : "false") << ")";
                 }
 
                 // Simulate Request power Event here for simplified mode
@@ -279,6 +299,8 @@ std::queue<CPEvent> IECStateMachine::state_machine(std::optional<RawCPState> con
                 if (!last_pwm_running && ev_simplified_mode) {
                     events.push(CPEvent::CarRequestedPower);
                 }
+            } else if (last_cp_state == RawCPState::B) {
+                EVLOG_warning << "IEC CP B->C power-on gate blocked because pwm_running=false";
             }
             break;
 
@@ -353,13 +375,23 @@ std::queue<CPEvent> IECStateMachine::state_machine(std::optional<RawCPState> con
 
 // High level state machine sets PWM duty cycle
 void IECStateMachine::set_pwm(double value) {
+    bool pwm_state_changed = false;
+    bool pwm_running_after = false;
     {
         Everest::scoped_lock_timeout lock(state_machine_mutex, Everest::MutexDescription::IEC_set_pwm);
+        const bool pwm_running_before = pwm_running;
         if (value > 0 && value < 1) {
             pwm_running = true;
         } else {
             pwm_running = false;
         }
+        pwm_state_changed = pwm_running_before != pwm_running;
+        pwm_running_after = pwm_running;
+    }
+
+    if (pwm_state_changed) {
+        EVLOG_info << "IEC PWM state changed to " << (pwm_running_after ? "active" : "inactive")
+                   << " (duty_cycle=" << value << ")";
     }
 
     if (ev_simplified_mode_evse_limit and ev_simplified_mode and value > ev_simplified_mode_evse_limit_pwm) {
@@ -397,16 +429,24 @@ void IECStateMachine::set_cp_state_F() {
 
 // The higher level state machine in Charger.cpp calls this to indicate it allows contactors to be switched on
 void IECStateMachine::allow_power_on(bool value, types::evse_board_support::Reason reason) {
+    RawCPState cp_state_snapshot;
+    bool pwm_running_snapshot = false;
     {
         Everest::scoped_lock_timeout lock(state_machine_mutex, Everest::MutexDescription::IEC_allow_power_on);
         // Only set the flags here in case of power on.
         power_on_allowed = value;
         power_on_reason = reason;
+        cp_state_snapshot = last_cp_state;
+        pwm_running_snapshot = pwm_running;
         // In case of power off, we can directly forward this to the BSP driver here
         if (not power_on_allowed) {
             call_allow_power_on_bsp(false);
         }
     }
+    EVLOG_info << "IEC allow_power_on request value=" << (value ? "true" : "false")
+               << ", reason=" << static_cast<unsigned int>(reason)
+               << ", cp_state=" << static_cast<unsigned int>(cp_state_snapshot)
+               << ", pwm_running=" << (pwm_running_snapshot ? "true" : "false");
     // The actual power on will be handled in the state machine to verify it is in the correct CP state etc.
     // Don't run the state machine in the callers context
     feed_state_machine(std::nullopt);

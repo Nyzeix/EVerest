@@ -634,7 +634,7 @@ void Charger::run_state_machine() {
             }
             break;
 
-        case EvseState::PrepareCharging:
+        case EvseState::PrepareCharging: {
             if (initialize_state) {
                 signal_simple_event(types::evse_manager::SessionEventEnum::PrepareCharging);
                 bcb_toggle_reset();
@@ -649,9 +649,16 @@ void Charger::run_state_machine() {
                 }
             }
 
-            if (stop_charging_on_fatal_error_internal() or not shared_context.flag_authorized or
-                not shared_context.flag_transaction_active or not shared_context.flag_ev_plugged_in or
-                shared_context.flag_disable_requested) {
+            const bool fatal_error = stop_charging_on_fatal_error_internal();
+            if (fatal_error or not shared_context.flag_authorized or not shared_context.flag_transaction_active or
+                not shared_context.flag_ev_plugged_in or shared_context.flag_disable_requested) {
+                EVLOG_warning << fmt::format(
+                    "PrepareCharging blocked before contactor evaluation (fatal_error={}, authorized={}, "
+                    "transaction_active={}, ev_plugged_in={}, disable_requested={})",
+                    fatal_error ? "true" : "false", shared_context.flag_authorized ? "true" : "false",
+                    shared_context.flag_transaction_active ? "true" : "false",
+                    shared_context.flag_ev_plugged_in ? "true" : "false",
+                    shared_context.flag_disable_requested ? "true" : "false");
                 // We started to initialize charging already, so we need to stop via StoppingCharging
                 set_state(EvseState::StoppingCharging);
                 break;
@@ -674,19 +681,43 @@ void Charger::run_state_machine() {
                 // In AC mode BASIC, iec_allow is sufficient.  The same is true for HLC mode when nominal PWM is
                 // used as the car can do BASIC and HLC charging any time. In AC HLC with 5 percent mode, we need to
                 // wait for both iec_allow and hlc_allow.
-                if (not power_available() and not hlc_use_5percent_current_session) {
+                const bool power_available_now = power_available();
+                if (not power_available_now and not hlc_use_5percent_current_session) {
                     // For AC BC: it is ok to wait here.
                     //  For AC and DC ISO, continue in case we are in 5% mode. This allows us to go into
                     //  Charge loop and report 0A/0W to the EV
+                    EVLOG_debug << fmt::format(
+                        "PrepareCharging blocked by unavailable power (iec_allow_close_contactor={}, "
+                        "hlc_allow_close_contactor={}, hlc_use_5percent_current_session={}, max_current={})",
+                        shared_context.iec_allow_close_contactor ? "true" : "false",
+                        shared_context.hlc_allow_close_contactor ? "true" : "false",
+                        hlc_use_5percent_current_session ? "true" : "false", shared_context.max_current);
                     break;
                 }
 
                 // Power is available or we are in HLC, PWM is already enabled. Check if we can go to charging
-                if ((shared_context.iec_allow_close_contactor and not hlc_use_5percent_current_session) or
-                    (shared_context.iec_allow_close_contactor and shared_context.hlc_allow_close_contactor and
-                     hlc_use_5percent_current_session)) {
+                const bool contactor_conditions_met =
+                    shared_context.iec_allow_close_contactor and
+                    (not hlc_use_5percent_current_session or shared_context.hlc_allow_close_contactor);
+                if (contactor_conditions_met) {
+                    EVLOG_info << fmt::format(
+                        "PrepareCharging conditions satisfied; entering Charging (power_available={}, "
+                        "iec_allow_close_contactor={}, hlc_allow_close_contactor={}, "
+                        "hlc_use_5percent_current_session={})",
+                        power_available_now ? "true" : "false",
+                        shared_context.iec_allow_close_contactor ? "true" : "false",
+                        shared_context.hlc_allow_close_contactor ? "true" : "false",
+                        hlc_use_5percent_current_session ? "true" : "false");
                     set_state(EvseState::Charging);
                 } else {
+                    EVLOG_debug << fmt::format(
+                        "PrepareCharging waiting for contactor conditions (power_available={}, "
+                        "iec_allow_close_contactor={}, hlc_allow_close_contactor={}, "
+                        "hlc_use_5percent_current_session={})",
+                        power_available_now ? "true" : "false",
+                        shared_context.iec_allow_close_contactor ? "true" : "false",
+                        shared_context.hlc_allow_close_contactor ? "true" : "false",
+                        hlc_use_5percent_current_session ? "true" : "false");
                     // We have power and PWM is on, but EV did not proceed to state C yet (and/or HLC is not
                     // ready)
                     if (not shared_context.hlc_charging_active and not shared_context.legacy_wakeup_done and
@@ -718,6 +749,7 @@ void Charger::run_state_machine() {
             //}
 
             break;
+        }
 
         case EvseState::Charging:
             if (initialize_state) {
@@ -1059,6 +1091,22 @@ void Charger::process_event(CPEvent cp_event) {
 
     Everest::scoped_lock_timeout lock(state_machine_mutex, Everest::MutexDescription::Charger_process_event);
 
+    const bool trace_power_event = cp_event == CPEvent::CarRequestedPower or
+                                   cp_event == CPEvent::CarRequestedStopPower or cp_event == CPEvent::PowerOn or
+                                   cp_event == CPEvent::PowerOff;
+    const auto state_before_event = shared_context.current_state;
+    const auto iec_allow_before_event = shared_context.iec_allow_close_contactor;
+    const auto hlc_allow_before_event = shared_context.hlc_allow_close_contactor;
+    if (trace_power_event) {
+        EVLOG_info << fmt::format(
+            "CP event {} received in charger state {} (iec_allow_close_contactor={}, "
+            "hlc_allow_close_contactor={}, hlc_charging_active={}, pwm_running={}, contactor_open={})",
+            cpevent_to_string(cp_event), evse_state_to_string(state_before_event),
+            iec_allow_before_event ? "true" : "false", hlc_allow_before_event ? "true" : "false",
+            shared_context.hlc_charging_active ? "true" : "false", shared_context.pwm_running ? "true" : "false",
+            shared_context.contactor_open ? "true" : "false");
+    }
+
     run_state_machine();
 
     // Process all event actions that are independent of the current state
@@ -1070,9 +1118,32 @@ void Charger::process_event(CPEvent cp_event) {
     process_cp_events_state(cp_event);
 
     run_state_machine();
+
+    if (trace_power_event) {
+        EVLOG_info << fmt::format(
+            "CP event {} completed: charger state {} -> {} (iec_allow_close_contactor={}, "
+            "hlc_allow_close_contactor={}, hlc_charging_active={}, pwm_running={}, contactor_open={})",
+            cpevent_to_string(cp_event), evse_state_to_string(state_before_event),
+            evse_state_to_string(shared_context.current_state),
+            shared_context.iec_allow_close_contactor ? "true" : "false",
+            shared_context.hlc_allow_close_contactor ? "true" : "false",
+            shared_context.hlc_charging_active ? "true" : "false", shared_context.pwm_running ? "true" : "false",
+            shared_context.contactor_open ? "true" : "false");
+    }
 }
 
 void Charger::process_cp_events_state(CPEvent cp_event) {
+    const bool trace_power_event = cp_event == CPEvent::CarRequestedPower or
+                                   cp_event == CPEvent::CarRequestedStopPower;
+    const auto state_before_event = shared_context.current_state;
+    const auto iec_allow_before_event = shared_context.iec_allow_close_contactor;
+
+    if (trace_power_event) {
+        EVLOG_info << fmt::format("Evaluating CP event {} in charger state {} (iec_allow_close_contactor={})",
+                                  cpevent_to_string(cp_event), evse_state_to_string(state_before_event),
+                                  iec_allow_before_event ? "true" : "false");
+    }
+
     switch (shared_context.current_state) {
 
     case EvseState::Idle:
@@ -1140,6 +1211,12 @@ void Charger::process_cp_events_state(CPEvent cp_event) {
 
     default:
         break;
+    }
+
+    if (trace_power_event and cp_event == CPEvent::CarRequestedPower and not iec_allow_before_event and
+        not shared_context.iec_allow_close_contactor) {
+        EVLOG_warning << fmt::format("CarRequestedPower did not enable contactor permission in charger state {}",
+                                     evse_state_to_string(state_before_event));
     }
 }
 
