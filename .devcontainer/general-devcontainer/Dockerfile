@@ -56,8 +56,13 @@ RUN ls -al /tmp/everest_dev_tool \
 ##################################################################
 
 # Modify the existing docker user and group to match the host's USER_UID and USER_GID
-RUN groupmod --gid ${USER_GID} ${USERNAME} && \
-    usermod --uid ${USER_UID} --gid ${USER_GID} ${USERNAME} && \
+RUN if getent group "${USER_GID}" >/dev/null 2>&1 && \
+       [ "$(getent group "${USER_GID}" | cut -d: -f1)" != "${USERNAME}" ]; then \
+        usermod --gid "${USER_GID}" "${USERNAME}"; \
+    else \
+        groupmod --gid "${USER_GID}" "${USERNAME}"; \
+    fi && \
+    usermod --uid "${USER_UID}" --gid "${USER_GID}" "${USERNAME}" && \
     usermod -aG dialout ${USERNAME}
 
 # Switch to the docker user
