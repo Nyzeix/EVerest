@@ -13,6 +13,10 @@
 
 namespace iso15118::d20::state {
 
+// Secc performance timer for PowerDelivery is 1.5s.
+// 100ms is resevered for polling timeout and sending the response.
+constexpr uint32_t AC_CLOSE_CONTACTOR_TIMEOUT = 1400;
+
 namespace dt = message_20::datatypes;
 
 message_20::PowerDeliveryResponse handle_request(const message_20::PowerDeliveryRequest& req,
@@ -52,12 +56,12 @@ Result PowerDelivery::feed(Event ev) {
         } else if (const auto* control_data = m_ctx.get_control_event<ClosedContactor>()) {
             ac_connector_closed = static_cast<bool>(*control_data);
 
-            const auto contactor_elapsed_ms = contactor_close_request_time.has_value()
-                                                  ? std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                        std::chrono::steady_clock::now() -
-                                                        contactor_close_request_time.value())
-                                                        .count()
-                                                  : -1;
+            const auto contactor_elapsed_ms =
+                contactor_close_request_time.has_value()
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                            contactor_close_request_time.value())
+                          .count()
+                    : -1;
             logf_info("PowerDelivery: received ClosedContactor(%s) after %lld ms",
                       ac_connector_closed ? "true" : "false", static_cast<long long>(contactor_elapsed_ms));
 
@@ -93,6 +97,8 @@ Result PowerDelivery::feed(Event ev) {
     if (ev == Event::TIMEOUT) {
         const auto timeout = m_ctx.get_active_timeout();
         if (timeout and *timeout == d20::TimeoutType::CONTACTOR) {
+            logf_error("AC contactor is not closed within %ums, sending failure response code and stop the session",
+                       AC_CLOSE_CONTACTOR_TIMEOUT);
             // TODO(SL): Check if value_or is the correct way
             const auto& res =
                 handle_request(previous_req.value_or(message_20::PowerDeliveryRequest{}), m_ctx.session, true);
@@ -143,7 +149,7 @@ Result PowerDelivery::feed(Event ev) {
             logf_info("PowerDelivery: requesting AC contactor close; waiting for ClosedContactor(true) before "
                       "sending PowerDeliveryRes");
             m_ctx.feedback.signal(session::feedback::Signal::AC_CLOSE_CONTACTOR);
-            m_ctx.start_timeout(d20::TimeoutType::CONTACTOR, 3000);
+            m_ctx.start_timeout(d20::TimeoutType::CONTACTOR, AC_CLOSE_CONTACTOR_TIMEOUT);
             logf_info("Waiting for contactor is closed");
             return {};
         }
