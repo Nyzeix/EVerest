@@ -11,6 +11,7 @@
 #include <everest_api_types/evse_board_support/wrapper.hpp>
 #include <everest_api_types/evse_manager/API.hpp>
 #include <everest_api_types/evse_manager/codec.hpp>
+#include <everest_api_types/evse_manager/json_codec.hpp>
 #include <everest_api_types/evse_manager/wrapper.hpp>
 #include <everest_api_types/generic/codec.hpp>
 #include <everest_api_types/generic/string.hpp>
@@ -30,6 +31,7 @@
 #include <everest_api_types/uk_random_delay/wrapper.hpp>
 #include <everest_api_types/utilities/AsyncApiRequestReply.hpp>
 #include <everest_api_types/utilities/codec.hpp>
+#include <everest_api_types/utilities/request_reply.hpp>
 
 #include <everest/logging.hpp>
 
@@ -52,6 +54,7 @@ namespace API_dc = API_types::power_supply_DC;
 namespace API_random_delay = API_types::uk_random_delay;
 namespace API_generic = API_types::generic;
 using ev_API::deserialize;
+using ev_API::deserialize_request;
 
 void evse_manager_consumer_API::init() {
     invoke_init(*p_main);
@@ -61,22 +64,8 @@ void evse_manager_consumer_API::init() {
     comm_params.communication_check_period_s = config.cfg_communication_check_to_s;
     comm_params.request_reply_timeout_s = config.cfg_request_reply_to_s;
     helper.init(comm_params);
-}
 
-void evse_manager_consumer_API::ready() {
-    invoke_ready(*p_main);
-
-    generate_api_cmd_get_evse();
-    generate_api_cmd_enable_disable();
-    generate_api_cmd_pause_charging();
-    generate_api_cmd_resume_charging();
-    generate_api_cmd_stop_transaction();
-    generate_api_cmd_force_unlock();
-    generate_api_cmd_random_delay_enable();
-    generate_api_cmd_random_delay_disable();
-    generate_api_cmd_random_delay_cancel();
-    generate_api_cmd_random_delay_set_duration_s();
-
+    // setup var forwarding before modules start publishing
     generate_api_var_session_event();
     generate_api_var_hlc_session_failed();
     generate_api_var_session_info(); // special, not just forwarded
@@ -97,6 +86,22 @@ void evse_manager_consumer_API::ready() {
     generate_api_var_dc_mode();
     generate_api_var_dc_capabilities();
     generate_api_var_random_delay_countdown();
+}
+
+void evse_manager_consumer_API::ready() {
+    invoke_ready(*p_main);
+
+    // setup commands now, as the target modules are ready
+    generate_api_cmd_get_evse();
+    generate_api_cmd_enable_disable();
+    generate_api_cmd_pause_charging();
+    generate_api_cmd_resume_charging();
+    generate_api_cmd_stop_transaction();
+    generate_api_cmd_force_unlock();
+    generate_api_cmd_random_delay_enable();
+    generate_api_cmd_random_delay_disable();
+    generate_api_cmd_random_delay_cancel();
+    generate_api_cmd_random_delay_set_duration_s();
 
     helper.generate_api_var_communication_check(&comm_check);
     comm_check.start(config.cfg_communication_check_to_s);
@@ -104,36 +109,27 @@ void evse_manager_consumer_API::ready() {
     helper.publish_ready_beacon();
 }
 
-auto evse_manager_consumer_API::forward_api_var(std::string const& var) {
-    using namespace API_types_ext;
-    using namespace API_powermeter;
-    using namespace API_generic;
-    using namespace API_energy;
-    using namespace API_evse_bsp;
-    using namespace API_iso;
-    using namespace API_imd;
-    using namespace API_dc;
-    using namespace API_random_delay;
-    const auto topic = helper.get_topics().everest_to_extern(var);
-    return [this, topic](auto const& val) {
-        try {
-            auto&& external = to_external_api(val);
-            auto&& payload = serialize(external);
-            mqtt_v.publish(topic, payload);
-        } catch (const std::exception& e) {
-            EVLOG_warning << "Variable: '" << topic << "' failed with -> " << e.what();
-        } catch (...) {
-            EVLOG_warning << "Invalid data: Cannot convert internal to external or serialize it.\n" << topic;
-        }
-    };
+auto evse_manager_consumer_API::forward_and_cache_api_var(std::string const& var) {
+    return helper.forward_and_cache_api_var(var, config.latch_variable_values, [var = var](auto const& val) {
+        using namespace API_types_ext;
+        using namespace API_powermeter;
+        using namespace API_generic;
+        using namespace API_energy;
+        using namespace API_evse_bsp;
+        using namespace API_iso;
+        using namespace API_imd;
+        using namespace API_dc;
+        using namespace API_random_delay;
+        return serialize(to_external_api(val));
+    });
 }
 
 void evse_manager_consumer_API::generate_api_cmd_get_evse() {
     helper.subscribe_api_topic("get_evse", [this](std::string const& data) {
-        API_generic::RequestReply msg;
-        if (deserialize(data, msg)) {
+        std::string reply_to;
+        if (deserialize_request(data, reply_to)) {
             auto reply = API_types_ext::to_external_api(r_evse_manager->call_get_evse());
-            mqtt_v.publish(msg.replyTo, serialize(reply));
+            mqtt_v.publish(reply_to, serialize(reply));
             return true;
         }
         return false;
@@ -142,14 +138,12 @@ void evse_manager_consumer_API::generate_api_cmd_get_evse() {
 
 void evse_manager_consumer_API::generate_api_cmd_enable_disable() {
     helper.subscribe_api_topic("enable_disable", [this](std::string const& data) {
-        API_generic::RequestReply msg;
-        if (deserialize(data, msg)) {
-            API_types_ext::EnableDisableRequest payload;
-            if (deserialize(msg.payload, payload)) {
-                auto reply = r_evse_manager->call_enable_disable(payload.connector_id, to_internal_api(payload.source));
-                mqtt_v.publish(msg.replyTo, API_generic::serialize(reply));
-                return true;
-            }
+        std::string reply_to;
+        API_types_ext::EnableDisableRequest payload;
+        if (deserialize_request(data, reply_to, payload)) {
+            auto reply = r_evse_manager->call_enable_disable(payload.connector_id, to_internal_api(payload.source));
+            mqtt_v.publish(reply_to, API_generic::serialize(reply));
+            return true;
         }
         return false;
     });
@@ -157,10 +151,10 @@ void evse_manager_consumer_API::generate_api_cmd_enable_disable() {
 
 void evse_manager_consumer_API::generate_api_cmd_pause_charging() {
     helper.subscribe_api_topic("pause_charging", [this](std::string const& data) {
-        API_generic::RequestReply msg;
-        if (deserialize(data, msg)) {
+        std::string reply_to;
+        if (deserialize_request(data, reply_to)) {
             auto result = r_evse_manager->call_pause_charging();
-            mqtt_v.publish(msg.replyTo, result);
+            mqtt_v.publish(reply_to, result);
             return true;
         }
         return false;
@@ -169,10 +163,10 @@ void evse_manager_consumer_API::generate_api_cmd_pause_charging() {
 
 void evse_manager_consumer_API::generate_api_cmd_resume_charging() {
     helper.subscribe_api_topic("resume_charging", [this](std::string const& data) {
-        API_generic::RequestReply msg;
-        if (deserialize(data, msg)) {
+        std::string reply_to;
+        if (deserialize_request(data, reply_to)) {
             auto result = r_evse_manager->call_resume_charging();
-            mqtt_v.publish(msg.replyTo, result);
+            mqtt_v.publish(reply_to, result);
             return true;
         }
         return false;
@@ -181,15 +175,12 @@ void evse_manager_consumer_API::generate_api_cmd_resume_charging() {
 
 void evse_manager_consumer_API::generate_api_cmd_stop_transaction() {
     helper.subscribe_api_topic("stop_transaction", [this](std::string const& data) {
-        auto result = false;
-        API_generic::RequestReply msg;
-        if (deserialize(data, msg)) {
-            API_types_ext::StopTransactionRequest_External payload;
-            if (deserialize(msg.payload, payload)) {
-                result = r_evse_manager->call_stop_transaction(API_types_ext::to_internal_api(payload));
-                mqtt_v.publish(msg.replyTo, result);
-                return true;
-            }
+        std::string reply_to;
+        API_types_ext::StopTransactionRequest_External payload;
+        if (deserialize_request(data, reply_to, payload)) {
+            auto result = r_evse_manager->call_stop_transaction(API_types_ext::to_internal_api(payload));
+            mqtt_v.publish(reply_to, result);
+            return true;
         }
         return false;
     });
@@ -197,13 +188,11 @@ void evse_manager_consumer_API::generate_api_cmd_stop_transaction() {
 
 void evse_manager_consumer_API::generate_api_cmd_force_unlock() {
     helper.subscribe_api_topic("force_unlock", [this](std::string const& data) {
-        API_generic::RequestReply msg;
-        if (deserialize(data, msg)) {
-            int payload;
-            if (deserialize(msg.payload, payload)) {
-                auto result = r_evse_manager->call_force_unlock(payload);
-                mqtt_v.publish(msg.replyTo, result);
-            }
+        std::string reply_to;
+        int payload{};
+        if (deserialize_request(data, reply_to, payload)) {
+            auto result = r_evse_manager->call_force_unlock(payload);
+            mqtt_v.publish(reply_to, result);
             return true;
         }
         return false;
@@ -250,104 +239,108 @@ void evse_manager_consumer_API::generate_api_cmd_random_delay_set_duration_s() {
 }
 
 void evse_manager_consumer_API::generate_api_var_session_event() {
-    r_evse_manager->subscribe_session_event(forward_api_var("session_event"));
+    r_evse_manager->subscribe_session_event(forward_and_cache_api_var("session_event"));
 }
 
 void evse_manager_consumer_API::generate_api_var_hlc_session_failed() {
-    r_evse_manager->subscribe_hlc_session_failed(forward_api_var("hlc_session_failed"));
+    r_evse_manager->subscribe_hlc_session_failed(forward_and_cache_api_var("hlc_session_failed"));
 }
 
 void evse_manager_consumer_API::generate_api_var_ev_info() {
-    r_evse_manager->subscribe_ev_info(forward_api_var("ev_info"));
+    r_evse_manager->subscribe_ev_info(forward_and_cache_api_var("ev_info"));
 }
 
 void evse_manager_consumer_API::generate_api_var_powermeter() {
-    r_evse_manager->subscribe_powermeter(forward_api_var("powermeter"));
+    r_evse_manager->subscribe_powermeter(forward_and_cache_api_var("powermeter"));
 }
 
 void evse_manager_consumer_API::generate_api_var_evse_id() {
-    r_evse_manager->subscribe_evse_id(forward_api_var("evse_id"));
+    r_evse_manager->subscribe_evse_id(forward_and_cache_api_var("evse_id"));
 }
 
 void evse_manager_consumer_API::generate_api_var_hw_capabilities() {
-    r_evse_manager->subscribe_hw_capabilities(forward_api_var("hw_capabilities"));
+    r_evse_manager->subscribe_hw_capabilities(forward_and_cache_api_var("hw_capabilities"));
 }
 
 void evse_manager_consumer_API::generate_api_var_enforced_limits() {
-    r_evse_manager->subscribe_enforced_limits(forward_api_var("enforced_limits"));
+    r_evse_manager->subscribe_enforced_limits(forward_and_cache_api_var("enforced_limits"));
 }
 
 void evse_manager_consumer_API::generate_api_var_selected_protocol() {
-    r_evse_manager->subscribe_selected_protocol(forward_api_var("selected_protocol"));
+    r_evse_manager->subscribe_selected_protocol(forward_and_cache_api_var("selected_protocol"));
 }
 
 void evse_manager_consumer_API::generate_api_var_supported_energy_transfer_modes() {
-    r_evse_manager->subscribe_supported_energy_transfer_modes(forward_api_var("supported_energy_transfer_modes"));
+    r_evse_manager->subscribe_supported_energy_transfer_modes(
+        forward_and_cache_api_var("supported_energy_transfer_modes"));
 }
 
 void evse_manager_consumer_API::generate_api_var_powermeter_public_key_ocmf() {
-    r_evse_manager->subscribe_powermeter_public_key_ocmf(forward_api_var("powermeter_public_key_ocmf"));
+    r_evse_manager->subscribe_powermeter_public_key_ocmf(forward_and_cache_api_var("powermeter_public_key_ocmf"));
 }
 
 void evse_manager_consumer_API::generate_api_var_ac_nr_of_phases_available() {
     if (not r_evse_bsp.empty()) {
-        r_evse_bsp[0]->subscribe_ac_nr_of_phases_available(forward_api_var("ac_nr_of_phases_available"));
+        r_evse_bsp[0]->subscribe_ac_nr_of_phases_available(forward_and_cache_api_var("ac_nr_of_phases_available"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_ac_pp_ampacity() {
     if (not r_evse_bsp.empty()) {
-        r_evse_bsp[0]->subscribe_ac_pp_ampacity(forward_api_var("ac_pp_ampacity"));
+        r_evse_bsp[0]->subscribe_ac_pp_ampacity(forward_and_cache_api_var("ac_pp_ampacity"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_dlink_ready() {
     if (not r_slac.empty()) {
-        r_slac[0]->subscribe_dlink_ready(forward_api_var("dlink_ready"));
+        r_slac[0]->subscribe_dlink_ready(forward_and_cache_api_var("dlink_ready"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_isolation_measurement() {
     if (not r_imd.empty()) {
-        r_imd[0]->subscribe_isolation_measurement(forward_api_var("isolation_measurement"));
+        r_imd[0]->subscribe_isolation_measurement(forward_and_cache_api_var("isolation_measurement"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_dc_voltage_current() {
     if (not r_ps_dc.empty()) {
-        r_ps_dc[0]->subscribe_voltage_current(forward_api_var("dc_voltage_current"));
+        r_ps_dc[0]->subscribe_voltage_current(forward_and_cache_api_var("dc_voltage_current"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_dc_mode() {
     if (not r_ps_dc.empty()) {
-        r_ps_dc[0]->subscribe_mode(forward_api_var("dc_mode"));
+        r_ps_dc[0]->subscribe_mode(forward_and_cache_api_var("dc_mode"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_dc_capabilities() {
     if (not r_ps_dc.empty()) {
-        r_ps_dc[0]->subscribe_capabilities(forward_api_var("dc_capabilities"));
+        r_ps_dc[0]->subscribe_capabilities(forward_and_cache_api_var("dc_capabilities"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_random_delay_countdown() {
     if (not r_random_delay.empty()) {
-        r_random_delay[0]->subscribe_countdown(forward_api_var("random_delay_countdown"));
+        r_random_delay[0]->subscribe_countdown(forward_and_cache_api_var("random_delay_countdown"));
     }
 }
 
 void evse_manager_consumer_API::generate_api_var_session_info() {
+    auto latched_publish = forward_and_cache_api_var("session_info");
     this->session_info.handle()->set_publish_callback(
-        [this](const everest::lib::API::V1_0::types::evse_manager::SessionInfo& external) {
+        [this, latched_publish = std::move(latched_publish)](
+            const everest::lib::API::V1_0::types::evse_manager::SessionInfo& external) {
             static const auto topic = helper.get_topics().everest_to_extern("session_info");
             try {
-                auto&& payload = serialize(external);
-                mqtt_v.publish(topic, payload);
+                latched_publish(external);
             } catch (const std::exception& e) {
                 EVLOG_warning << "Variable: '" << topic << "' failed with -> " << e.what();
             } catch (...) {
-                EVLOG_warning << "Invalid data: Cannot convert internal to external or serialize it.\n" << topic;
+                EVLOG_warning << "Invalid data: Cannot convert internal to external "
+                                 "or serialize it.\n"
+                              << topic;
             }
         });
 

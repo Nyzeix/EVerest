@@ -12,7 +12,6 @@
 #include <iso15118/message/payload_type.hpp>
 #include <iso15118/message/variant.hpp>
 #include <iso15118/session/feedback.hpp>
-#include <iso15118/session/logger.hpp>
 
 #include "config.hpp"
 #include "control_event.hpp"
@@ -79,7 +78,7 @@ using BasePointerType = std::unique_ptr<StateBase>;
 class Context {
 public:
     // FIXME (aw): bundle arguments
-    Context(session::feedback::Callbacks, session::SessionLogger&, d20::SessionConfig, std::optional<PauseContext>&,
+    Context(session::feedback::Callbacks, d20::SessionConfig, std::optional<PauseContext>&,
             const std::optional<ControlEvent>&, MessageExchange&, Timeouts&);
 
     template <typename StateType, typename... Args> BasePointerType create_state(Args&&... args) {
@@ -140,9 +139,15 @@ public:
         current_timeout = timeout;
     }
 
-    const session::Feedback feedback;
+    void request_shutdown() {
+        requested_shutdown = true;
+    }
 
-    session::SessionLogger& log;
+    [[nodiscard]] bool shutdown_requested() const {
+        return requested_shutdown;
+    }
+
+    const session::Feedback feedback;
 
     Session session;
 
@@ -170,6 +175,8 @@ private:
     Timeouts& timeouts;
 
     std::optional<TimeoutType> current_timeout{std::nullopt};
+
+    bool requested_shutdown{false};
 };
 
 } // namespace iso15118::d20

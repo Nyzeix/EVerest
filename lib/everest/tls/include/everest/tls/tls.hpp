@@ -8,6 +8,7 @@
 #include "extensions/trusted_ca_keys.hpp"
 #include <everest/tls/tls_types.hpp>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -22,6 +23,7 @@
 #include <pthread.h>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 namespace tls {
 
@@ -58,6 +60,8 @@ public:
             value = ptr;
         }
     }
+    ConfigItem(const std::string& s) : value(s) {
+    }
     inline operator const char*() const {
         return (value) ? value.value().c_str() : nullptr;
     }
@@ -68,10 +72,18 @@ public:
     TlsKeyLoggingServer(const std::string& interface_name, uint16_t port_);
     ~TlsKeyLoggingServer();
 
-    ssize_t send(const char* line);
+    /**
+     * \brief send one key-log line to the multicast destination
+     * \returns false when the socket is unusable or the line was not sent in full
+     */
+    bool send(const char* line);
 
-    auto get_fd() const {
-        return fd;
+    /**
+     * \brief whether the multicast socket was set up
+     * \returns false when the constructor failed, in which case the object cannot send
+     */
+    [[nodiscard]] bool is_valid() const {
+        return fd != -1;
     }
 
     auto get_port() const {
@@ -122,7 +134,10 @@ public:
 
     enum class result_t : std::uint8_t {
         success,    //!< operation completed successfully
-        closed,     //!< connection closed (possibly due to error)
+        closed,     //!< connection closed: covers a graceful peer close, a TLS
+                    //!< protocol error, and a syscall error; last_error() is
+                    //!< non-empty when the close was caused by an error rather
+                    //!< than a graceful close
         timeout,    //!< operation timed out
         want_read,  //!< non-blocking - operation waiting for read available on socket
         want_write, //!< non-blocking - operation waiting for write available on socket
@@ -131,9 +146,11 @@ public:
 protected:
     std::unique_ptr<connection_ctx> m_context; //!< opaque connection data
     state_t m_state{state_t::idle};            //!< connection state
-    std::string m_ip;                          //!< peer IP address
+    std::string m_peer_host;                   //!< peer host, a DNS hostname or IP literal
     std::string m_service;                     //!< peer port
     std::int32_t m_timeout_ms;                 //!< default operation timeout
+    std::string
+        m_last_error; //!< OpenSSL error text from the operation that closed this connection; empty on graceful close
 
     // prevent standalone construction
     Connection(SslContext* ctx, int soc, const char* ip_in, const char* service_in, std::int32_t timeout_ms);
@@ -216,10 +233,11 @@ public:
     }
 
     /**
-     * IP address of the connection's peer
+     * Host of the connection's peer: a DNS hostname or IP literal. The name is
+     * kept for API stability.
      */
     [[nodiscard]] const std::string& ip_address() const {
-        return m_ip;
+        return m_peer_host;
     }
 
     /**
@@ -238,10 +256,39 @@ public:
     }
 
     /**
+     * \brief OpenSSL error text from the operation that most recently closed the
+     *        connection
+     * \return "; "-joined error strings; empty when the close was graceful or no
+     *         error has been captured
+     */
+    [[nodiscard]] const std::string& last_error() const {
+        return m_last_error;
+    }
+
+    /**
      * \brief obtain the underlying socket for use with poll() or select()
      * \returns the underlying socket or INVALID_SOCKET on error
      */
     [[nodiscard]] int socket() const;
+
+    /**
+     * \brief whether the SSL object and its socket BIO were allocated
+     * \returns false when allocation failed, in which case no BIO_CLOSE owner
+     *          adopted the socket fd and the caller still owns it
+     */
+    [[nodiscard]] bool is_valid() const;
+
+    /**
+     * \brief whether the TLS record layer still holds buffered data
+     * \returns true when a further read() can return data without the socket
+     *          becoming readable again
+     * \note SSL_has_pending() is used rather than SSL_pending(): the latter
+     *       counts only the decrypted remainder of the record being processed
+     *       and returns 0 while a complete but still unprocessed record sits in
+     *       the read buffer. A drain loop guarded on that count would stop with
+     *       data stranded in userspace and never be woken again.
+     */
+    [[nodiscard]] bool has_pending() const;
 
     /**
      * \brief obtain the peer certificate
@@ -309,6 +356,13 @@ public:
     }
 
     /**
+     * \brief obtain the SHA-512 digest of the peer's leaf certificate (DER)
+     * \returns the 64-byte digest, or std::nullopt if no peer certificate was
+     *          presented or the digest could not be computed
+     */
+    [[nodiscard]] std::optional<std::array<std::uint8_t, 64>> peer_certificate_sha512() const;
+
+    /**
      * \brief wait for all connections to be closed
      */
     static void wait_all_closed();
@@ -327,7 +381,8 @@ public:
  */
 class ClientConnection : public Connection {
 public:
-    ClientConnection(SslContext* ctx, int soc, const char* ip_in, const char* service_in, std::int32_t timeout_ms);
+    ClientConnection(SslContext* ctx, int soc, const char* ip_in, const char* service_in, std::int32_t timeout_ms,
+                     bool verify_subject_name);
     ClientConnection() = delete;
     ClientConnection(const ClientConnection&) = delete;
     ClientConnection(ClientConnection&&) = delete;
@@ -402,14 +457,17 @@ public:
         std::vector<certificate_config_t> chains; //!< server certificate chains - must be at least one
         //!< one or more trust anchor PEM certificates for client certificate verification
         ConfigItem verify_locations_file{nullptr};
-        ConfigItem verify_locations_path{nullptr};        //!< for client certificate
+        ConfigItem verify_locations_path{nullptr}; //!< for client certificate
+        //!< extra CA trust-anchor PEM files loaded in addition to verify_locations_file,
+        //!< e.g. the MO root for ISO 15118-20
+        std::vector<ConfigItem> verify_locations_additional_files;
         std::int32_t io_timeout_ms{-1};                   //!< socket timeout in milliseconds (recommend > 1 sec)
         bool verify_client{true};                         //!< client certificate required
         bool ignore_unhandled_critical_extensions{false}; //!< when true, install a verify callback that
-                                                          //!< suppresses X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION
-                                                          //!< for certs whose critical extensions all have
-                                                          //!< well-known RFC 5280 NIDs. Intended for diagnosing
-                                                          //!< non-compliant EV / V2G test certs.
+                                  //!< suppresses X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION
+                                  //!< for certs whose critical extensions all have
+                                  //!< well-known RFC 5280 NIDs. Intended for diagnosing
+                                  //!< non-compliant EV / V2G test certs.
 
         // config not used on update()
         ConfigItem host{nullptr};    //!< see BIO_lookup_ex()
@@ -419,6 +477,11 @@ public:
 
         bool tls_key_logging{false};      //!< tls key logging is active when true
         std::string tls_key_logging_path; //!< tls key logging file path
+
+        //!< when true the server requires TLS 1.3 minimum; ciphersuites must be non-empty
+        bool enforce_tls_1_3{false};
+        bool verify_client_on_tls13{false}; //!< when true, require a peer certificate once TLS 1.3 is negotiated even
+                                            //!< if verify_client is false
     };
 
     using ConnectionPtr = std::unique_ptr<ServerConnection>;
@@ -449,6 +512,7 @@ private:
     ConfigurationCallback m_init_callback{nullptr};     //!< callback to retrieve SSL configuration
 
     ConfigItem m_tls_key_interface{nullptr};
+    bool m_verify_client_on_tls13{false};
     std::filesystem::path tls_key_log_file_path{};
 
     /**
@@ -492,6 +556,24 @@ private:
      * \param[in] handler - called with the new connection socket
      */
     void wait_for_connection(const ConnectionHandler& handler);
+
+    /**
+     * \brief upgrade verify mode to require a peer certificate when the
+     *        client advertises TLS 1.3 in its ClientHello
+     * \param[in] ssl the connection context
+     * \param[out] alert alert to send on error
+     * \return SSL_CLIENT_HELLO_SUCCESS
+     */
+    int handle_tls_1_3_verify_upgrade(Ssl* ssl, int* alert);
+
+    /**
+     * \brief dispatches the client_hello callback to per-feature handlers
+     * \param[in] ssl the connection context
+     * \param[out] alert alert to send on error
+     * \param[in] object the Server instance
+     * \return SSL_CLIENT_HELLO_SUCCESS on success
+     */
+    static int client_hello_cb_dispatch(Ssl* ssl, int* alert, void* object);
 
 public:
     Server();
@@ -584,6 +666,21 @@ public:
     [[nodiscard]] state_t state() const {
         return m_state;
     }
+
+    /**
+     * \brief wrap an externally-accepted TCP socket as a TLS server connection
+     * \param[in] soc accepted TCP socket file descriptor
+     * \param[in] ip peer IP address string (may be nullptr)
+     * \param[in] service peer service/port string (may be nullptr)
+     * \return ConnectionPtr that owns \p soc on success; nullptr if SSL_CTX is not initialised
+     * \note Lets callers take ownership of the listen/accept loop and hand the
+     *       accepted fd to a configured Server (mirrors the factory used by
+     *       the internal accept path in serve()).
+     * \note Ownership: on success the returned ServerConnection owns \p soc and
+     *       will close it. On a nullptr return the caller still owns \p soc and
+     *       must close it; this factory does not close \p soc on failure.
+     */
+    [[nodiscard]] ConnectionPtr wrap_accepted_fd(int soc, const char* ip, const char* service);
 };
 
 // ----------------------------------------------------------------------------
@@ -639,10 +736,19 @@ public:
         const char* verify_locations_path{nullptr};  //!< for server certificate
         trusted_ca_keys_t trusted_ca_keys_data;      //!< trusted CA keys configuration data
         std::int32_t io_timeout_ms{-1};              //!< default socket timeout in milliseconds (recommend > 1 sec)
-        bool verify_server{true};                    //!< verify the server certificate
-        bool status_request{false};                  //!< include a status request extension in the client hello
-        bool status_request_v2{false};               //!< include a status request v2 extension in the client hello
-        bool trusted_ca_keys{false};                 //!< include a trusted ca keys extension in the client hello
+        //!< minimum TLS protocol version, e.g. TLS1_2_VERSION or TLS1_3_VERSION; 0 means use default
+        int min_proto_version{0};
+        bool verify_server{true}; //!< verify the server certificate
+
+        //! verify_subject_name: match the peer certificate subject/SAN against the SNI host via
+        //! SSL_set1_host. Requires verify_server, init() rejects the combination without it because the
+        //! host cannot be enforced. The default (false) is chain-of-trust ONLY: a certificate signed by
+        //! any trusted CA is accepted whatever host it was issued for. Leave it false for a PKI whose
+        //! certificates carry no hostname; set true for a hostname-bearing PKI.
+        bool verify_subject_name{false};
+        bool status_request{false};    //!< include a status request extension in the client hello
+        bool status_request_v2{false}; //!< include a status request v2 extension in the client hello
+        bool trusted_ca_keys{false};   //!< include a trusted ca keys extension in the client hello
         bool ignore_unhandled_critical_extensions{false}; //!< see Server::config_t
     };
 
@@ -651,6 +757,7 @@ public:
 private:
     std::unique_ptr<client_ctx> m_context;                      //!< opaque object data
     std::int32_t m_timeout_ms{-1};                              //!< default operation timeout
+    bool m_verify_subject_name{false};                          //!< applied to new connections
     trusted_ca_keys_t m_trusted_ca_keys;                        //!< trusted CA keys configuration data
     std::unique_ptr<ClientStatusRequestV2> m_status_request_v2; //!< status request extension handler
 
@@ -690,6 +797,19 @@ public:
     [[nodiscard]] inline ConnectionPtr connect(const char* host, const char* service, bool ipv6_only) {
         return connect(host, service, ipv6_only, m_timeout_ms);
     }
+
+    /**
+     * \brief wrap an already-connected or still-connecting TCP socket as a TLS client connection
+     * \param[in] fd TCP socket file descriptor
+     * \param[in] host_for_sni host for the peer-id / SNI slot, may be nullptr
+     * \return nullptr if the SSL_CTX is not initialised or SSL/BIO allocation fails
+     * \note A DNS \p host_for_sni is sent in the SNI extension, an IP literal is not
+     *       (RFC 6066 §3). With config_t::verify_subject_name the peer certificate is
+     *       pinned to \p host_for_sni and a pin failure fails the handshake closed.
+     * \note Ownership: on success the connection owns \p fd and closes it. On a
+     *       nullptr return the caller still owns \p fd; this factory never closes it.
+     */
+    [[nodiscard]] ConnectionPtr wrap_connecting_fd(int fd, const char* host_for_sni);
 
     /**
      * \brief the default SSL callbacks

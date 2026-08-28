@@ -79,7 +79,13 @@ void set_dynamic_parameters_in_res(T& res_mode, const UpdateDynamicModeParameter
         }
     }
     res_mode.target_soc = parameters.target_soc;
-    res_mode.minimum_soc = parameters.min_soc;
+
+    // [V2G20-1290]
+    if (parameters.min_soc.has_value() and parameters.target_soc.has_value() and
+        parameters.min_soc.value() <= parameters.target_soc.value()) {
+        res_mode.minimum_soc = parameters.min_soc;
+    }
+
     res_mode.ack_max_delay = 30; // TODO(sl) what to send here and define 30 seconds as const
 }
 } // namespace
@@ -180,16 +186,18 @@ message_20::DC_ChargeLoopResponse handle_request(const message_20::DC_ChargeLoop
     if (stop) {
         res.status = {0, dt::EvseNotification::Terminate};
     } else if (pause) {
-        const uint16_t notification_max_delay =
-            (selected_control_mode == dt::ControlMode::Dynamic) ? 60 : 0; // [V2G20-1850]
-        res.status = {notification_max_delay, dt::EvseNotification::Pause};
+        constexpr auto NotificationMaxDelay = 60; // [V2G20-3308]
+        res.status = {NotificationMaxDelay, dt::EvseNotification::Pause};
+
+        // TODO(SL): [V2G20-3318] Decrease notificationmaxdelay based on the reaming seconds if the ev did not perform a
+        // pause
     }
 
     return response_with_code(res, dt::ResponseCode::OK);
 }
 
 void DC_ChargeLoop::enter() {
-    m_ctx.log.enter_state("DC_ChargeLoop");
+    logf_debug("Enter state: DC_ChargeLoop");
     dynamic_parameters = m_ctx.cache_dynamic_mode_parameters.value_or(UpdateDynamicModeParameters{});
 }
 
@@ -219,7 +227,10 @@ Result DC_ChargeLoop::feed(Event ev) {
     const auto variant = m_ctx.pull_request();
 
     if (const auto req = variant->get_if<message_20::PowerDeliveryRequest>()) {
-        const auto res = handle_request(*req, m_ctx.session, false);
+
+        const auto shutdown_requested = m_ctx.shutdown_requested();
+
+        const auto res = handle_request(*req, m_ctx.session, false, shutdown_requested);
 
         m_ctx.respond(res);
 
@@ -233,7 +244,7 @@ Result DC_ChargeLoop::feed(Event ev) {
 
         // Todo(sl): React properly to Start, Stop, Standby and ScheduleRenegotiation
         // TODO(Sl): How to check if the EV wants do a pause in dynamic mode (This should not happen)
-        if (req->charge_progress == dt::Progress::Stop) {
+        if (req->charge_progress == dt::Progress::Stop or shutdown_requested) {
             m_ctx.feedback.signal(session::feedback::Signal::CHARGE_LOOP_FINISHED);
             m_ctx.feedback.signal(session::feedback::Signal::DC_OPEN_CONTACTOR);
             return m_ctx.create_state<DC_WeldingDetection>();
@@ -265,7 +276,7 @@ Result DC_ChargeLoop::feed(Event ev) {
 
         return {};
     } else {
-        m_ctx.log("Expected PowerDeliveryReq or DC_ChargeLoopReq! But code type id: %d", variant->get_type());
+        logf_warning("Expected PowerDeliveryReq or DC_ChargeLoopReq! But code type id: %d", variant->get_type());
 
         // Sequence Error
         const message_20::Type req_type = variant->get_type();

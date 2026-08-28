@@ -38,6 +38,8 @@ std::string token_handling_result_to_string(const TokenHandlingResult& result) {
         return "USED_TO_STOP_TRANSACTION";
     case TokenHandlingResult::WITHDRAWN:
         return "WITHDRAWN";
+    case TokenHandlingResult::USED_TO_REAUTHORIZE:
+        return "USED_TO_REAUTHORIZE";
     default:
         throw std::runtime_error("No known conversion for the given token handling result");
     }
@@ -46,12 +48,13 @@ std::string token_handling_result_to_string(const TokenHandlingResult& result) {
 
 AuthHandler::AuthHandler(const SelectionAlgorithm& selection_algorithm, const int connection_timeout,
                          bool plug_in_timeout_enabled, bool prioritize_authorization_over_stopping_transaction,
-                         bool ignore_faults, const std::string& id, kvsIntf* store) :
+                         bool ignore_faults, bool stop_transaction_on_reswipe, const std::string& id, kvsIntf* store) :
     selection_algorithm(selection_algorithm),
     connection_timeout(connection_timeout),
     plug_in_timeout_enabled(plug_in_timeout_enabled),
     prioritize_authorization_over_stopping_transaction(prioritize_authorization_over_stopping_transaction),
     ignore_faults(ignore_faults),
+    stop_transaction_on_reswipe(stop_transaction_on_reswipe),
     reservation_handler(evses, id, store) {
 }
 
@@ -130,6 +133,9 @@ TokenHandlingResult AuthHandler::on_token(const ProvidedIdToken& provided_token)
     case TokenHandlingResult::WITHDRAWN:
         this->publish_token_validation_status(provided_token_copy, TokenValidationStatus::Withdrawn);
         break;
+    case TokenHandlingResult::USED_TO_REAUTHORIZE:
+        this->publish_token_validation_status(provided_token_copy, TokenValidationStatus::UsedToReauthorize);
+        break;
     }
 
     if (result != TokenHandlingResult::ALREADY_IN_PROCESS) {
@@ -177,6 +183,16 @@ TokenHandlingResult AuthHandler::handle_token(ProvidedIdToken& provided_token, s
         const auto evse_used_for_transaction =
             this->used_for_transaction(referenced_evses, provided_token.id_token.value);
         if (evse_used_for_transaction != -1) {
+            if (!this->stop_transaction_on_reswipe) {
+                if (this->evses.at(evse_used_for_transaction)->identifier->parent_id_token.has_value()) {
+                    provided_token.parent_id_token =
+                        this->evses.at(evse_used_for_transaction)->identifier->parent_id_token.value();
+                }
+                provided_token.connectors = std::vector<int32_t>{evse_used_for_transaction};
+                EVLOG_info << "Transaction was not stopped by renewed presentation of id_token for evse#"
+                           << evse_used_for_transaction << " because stop_transaction_on_reswipe is false";
+                return TokenHandlingResult::USED_TO_REAUTHORIZE;
+            }
             StopTransactionRequest req;
             req.reason = StopTransactionReason::Local;
             req.id_tag.emplace(provided_token);
@@ -298,6 +314,12 @@ TokenHandlingResult AuthHandler::handle_token(ProvidedIdToken& provided_token, s
                     if (!this->evses[evse_used_for_transaction]->transaction_active) {
                         return TokenHandlingResult::ALREADY_IN_PROCESS;
                     } else {
+                        if (!this->stop_transaction_on_reswipe) {
+                            provided_token.parent_id_token = validation_result.parent_id_token.value();
+                            EVLOG_info << "Transaction was not stopped by parent_id_token match because "
+                                          "stop_transaction_on_reswipe is false";
+                            return TokenHandlingResult::USED_TO_REAUTHORIZE;
+                        }
                         StopTransactionRequest req;
                         req.reason = StopTransactionReason::Local;
                         req.id_tag.emplace(provided_token);
@@ -523,10 +545,21 @@ bool AuthHandler::equals_master_pass_group_id(const std::optional<types::authori
     return is_equal_case_insensitive(parent_id_token.value().value, this->master_pass_group_id.value());
 }
 
-int AuthHandler::get_latest_plugin(const std::vector<int>& evse_ids) {
+int AuthHandler::get_oldest_plugin(const std::vector<int>& evse_ids) {
+    // plug ins are appended to the back of the queue, so iterating from the front returns the earliest plug in first
     for (const auto evse_id : this->plug_in_queue) {
         if (std::find(evse_ids.begin(), evse_ids.end(), evse_id) != evse_ids.end()) {
             return evse_id;
+        }
+    }
+    return -1;
+}
+
+int AuthHandler::get_last_plugin(const std::vector<int>& evse_ids) {
+    // plug ins are appended to the back of the queue, so iterating from the back returns the most recent plug in first
+    for (auto it = this->plug_in_queue.rbegin(); it != this->plug_in_queue.rend(); ++it) {
+        if (std::find(evse_ids.begin(), evse_ids.end(), *it) != evse_ids.end()) {
+            return *it;
         }
     }
     return -1;
@@ -542,16 +575,25 @@ AuthHandler::SelectEvseResult AuthHandler::select_evse(const std::vector<int>& s
         return result;
     }
 
-    if (this->selection_algorithm == SelectionAlgorithm::PlugEvents) {
+    if (this->selection_algorithm == SelectionAlgorithm::PlugEvents ||
+        this->selection_algorithm == SelectionAlgorithm::PlugEventsLIFO) {
+        // Both algorithms wait for a plug in and then select a plugged in evse based on plug in order. PlugEvents
+        // selects the earliest pending plug in among the referenced evses, PlugEventsLIFO the most recent one.
+        const auto select_plugged_in_evse = [this, &selected_evses]() {
+            return this->selection_algorithm == SelectionAlgorithm::PlugEventsLIFO
+                       ? this->get_last_plugin(selected_evses)
+                       : this->get_oldest_plugin(selected_evses);
+        };
+
         // locks all referenced evses for this request. Subsequent requests referencing one or more of the locked
         // evses are blocked until handle_token returns
-        if (this->get_latest_plugin(selected_evses) == -1) {
+        if (select_plugged_in_evse() == -1) {
             // no EV has been plugged in yet at the referenced evses
             EVLOG_debug << "No evse in authorization queue. Waiting for a plug in...";
             // blocks until respective plugin for evse occurred or until timeout
             if (!this->cv.wait_for(lk, std::chrono::seconds(this->connection_timeout),
-                                   [this, selected_evses, id_token] {
-                                       return this->get_latest_plugin(selected_evses) != -1 ||
+                                   [this, selected_evses, id_token, select_plugged_in_evse] {
+                                       return select_plugged_in_evse() != -1 ||
                                               this->is_authorization_withdrawn(selected_evses, id_token);
                                    })) {
                 result.status = SelectEvseReturnStatus::TimeOut;
@@ -564,17 +606,17 @@ AuthHandler::SelectEvseResult AuthHandler::select_evse(const std::vector<int>& s
             result.status = SelectEvseReturnStatus::Interrupted;
         } else {
             result.status = SelectEvseReturnStatus::EvseSelected;
-            result.evse_id = this->get_latest_plugin(selected_evses);
+            result.evse_id = select_plugged_in_evse();
         }
 
         return result;
     } else if (this->selection_algorithm == SelectionAlgorithm::FindFirst) {
         EVLOG_debug << "SelectionAlgorithm FindFirst: Selecting first available evse without an active transaction";
-        const auto selected_evse_id = this->get_latest_plugin(selected_evses);
+        const auto selected_evse_id = this->get_oldest_plugin(selected_evses);
         if (selected_evse_id != -1 and !this->evses.at(selected_evse_id)->transaction_active) {
             // an EV has been plugged in yet at the referenced evses
             result.status = SelectEvseReturnStatus::EvseSelected;
-            result.evse_id = this->get_latest_plugin(selected_evses);
+            result.evse_id = this->get_oldest_plugin(selected_evses);
             return result;
         } else {
             // no EV has been plugged in yet at the referenced evses; choosing the first one where no
@@ -917,6 +959,11 @@ void AuthHandler::set_prioritize_authorization_over_stopping_transaction(bool b)
     this->prioritize_authorization_over_stopping_transaction = b;
 }
 
+void AuthHandler::set_stop_transaction_on_reswipe(bool stop_transaction_on_reswipe) {
+    std::lock_guard<std::mutex> lk(this->event_mutex);
+    this->stop_transaction_on_reswipe = stop_transaction_on_reswipe;
+}
+
 void AuthHandler::register_notify_evse_callback(
     const std::function<void(const int evse_index, const ProvidedIdToken& provided_token,
                              const ValidationResult& validation_result)>& callback) {
@@ -1017,6 +1064,15 @@ WithdrawAuthorizationResult AuthHandler::handle_withdraw_authorization(const Wit
             this->stop_transaction_callback(evse.evse_index, req);
         } else {
             this->withdraw_authorization_callback(evse.evse_index);
+            if (evse.identifier.has_value()) {
+                const auto& identifier = evse.identifier.value();
+                ProvidedIdToken provided_token;
+                provided_token.id_token = identifier.id_token;
+                provided_token.authorization_type = identifier.type;
+                provided_token.parent_id_token = identifier.parent_id_token;
+                provided_token.connectors = std::vector<int32_t>{evse.evse_id};
+                this->publish_token_validation_status(provided_token, TokenValidationStatus::Withdrawn);
+            }
         }
     };
 

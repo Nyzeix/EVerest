@@ -53,12 +53,6 @@ const ComponentVariable InternalCtrlrEnabled = {
         "Enabled",
     }),
 };
-const RequiredComponentVariable ChargePointId = {
-    ControllerComponents::InternalCtrlr,
-    std::optional<Variable>({
-        "ChargePointId",
-    }),
-};
 const RequiredComponentVariable NetworkConnectionProfiles = {
     ControllerComponents::InternalCtrlr,
     std::optional<Variable>({
@@ -210,9 +204,15 @@ const ComponentVariable MaxCompositeScheduleDuration = {
     }),
 };
 const RequiredComponentVariable NumberOfConnectors = {
-    ControllerComponents::InternalCtrlr,
+    ControllerComponents::OCPP16LegacyCtrlr,
     std::optional<Variable>({
         "NumberOfConnectors",
+    }),
+};
+const ComponentVariable ConnectorEvseIds = {
+    ControllerComponents::OCPP16LegacyCtrlr,
+    std::optional<Variable>({
+        "ConnectorEvseIds",
     }),
 };
 const ComponentVariable UseSslDefaultVerifyPaths = {
@@ -243,6 +243,12 @@ const ComponentVariable VerifyCsmsAllowWildcards = {
     ControllerComponents::InternalCtrlr,
     std::optional<Variable>({
         "VerifyCsmsAllowWildcards",
+    }),
+};
+const ComponentVariable ReportSuspendedEVSEReasonChange = {
+    ControllerComponents::InternalCtrlr,
+    std::optional<Variable>({
+        "ReportSuspendedEVSEReasonChange",
     }),
 };
 const ComponentVariable IFace = {
@@ -351,6 +357,12 @@ const ComponentVariable AllowSecurityLevelZeroConnections = {
     ControllerComponents::InternalCtrlr,
     std::optional<Variable>({
         "AllowSecurityLevelZeroConnections",
+    }),
+};
+const ComponentVariable DeferFirmwareDownloadDuringTransaction = {
+    ControllerComponents::InternalCtrlr,
+    std::optional<Variable>({
+        "DeferFirmwareDownloadDuringTransaction",
     }),
 };
 const RequiredComponentVariable SupportedOcppVersions = {
@@ -491,7 +503,7 @@ const ComponentVariable OfflineTxForUnknownIdEnabled = {
 };
 const ComponentVariable AllowNewSessionsPendingFirmwareUpdate = {
     ControllerComponents::ChargingStation,
-    std::optional<Variable>({"AllowNewSessionsPendingFirmwareUpdate", "BytesPerMessage"}),
+    std::optional<Variable>({"AllowNewSessionsPendingFirmwareUpdate"}),
 };
 const RequiredComponentVariable ChargingStationAvailabilityState = {
     ControllerComponents::ChargingStation,
@@ -1298,12 +1310,6 @@ const ComponentVariable ReserveConnectorZeroSupported = {
         "ReserveConnectorZeroSupported",
     }),
 };
-const ComponentVariable HostName = {
-    ControllerComponents::OCPP16LegacyCtrlr,
-    std::optional<Variable>({
-        "HostName",
-    }),
-};
 const ComponentVariable AllowChargingProfileWithoutStartSchedule = {
     ControllerComponents::OCPP16LegacyCtrlr,
     std::optional<Variable>({
@@ -1316,10 +1322,28 @@ const ComponentVariable WaitForStopTransactionsOnResetTimeout = {
         "WaitForStopTransactionsOnResetTimeout",
     }),
 };
+const ComponentVariable SwitchSecurityProfileConnectionTimeout = {
+    ControllerComponents::OCPP16LegacyCtrlr,
+    std::optional<Variable>({
+        "SwitchSecurityProfileConnectionTimeout",
+    }),
+};
 const ComponentVariable StopTransactionIfUnlockNotSupported = {
     ControllerComponents::OCPP16LegacyCtrlr,
     std::optional<Variable>({
         "StopTransactionIfUnlockNotSupported",
+    }),
+};
+const ComponentVariable RejectRemoteStartTransactionWithoutConnectorId = {
+    ControllerComponents::OCPP16LegacyCtrlr,
+    std::optional<Variable>({
+        "RejectRemoteStartTransactionWithoutConnectorId",
+    }),
+};
+const ComponentVariable RemoteStartTransactionWithoutConnectorIdFindFirst = {
+    ControllerComponents::OCPP16LegacyCtrlr,
+    std::optional<Variable>({
+        "RemoteStartTransactionWithoutConnectorIdFindFirst",
     }),
 };
 const ComponentVariable MeterPublicKeys = {
@@ -1388,22 +1412,10 @@ const ComponentVariable WaitForSetUserPriceTimeout = {
         "WaitForSetUserPriceTimeout",
     }),
 };
-const ComponentVariable AuthorizationKey16 = {
-    ControllerComponents::CustomLegacyController,
+const ComponentVariable ReportClearedErrors = {
+    ControllerComponents::OCPP16LegacyCtrlr,
     std::optional<Variable>({
-        "AuthorizationKey",
-    }),
-};
-const RequiredComponentVariable CentralSystemURI16 = {
-    ControllerComponents::CustomLegacyController,
-    std::optional<Variable>({
-        "CentralSystemURI",
-    }),
-};
-const RequiredComponentVariable SecurityProfile16 = {
-    ControllerComponents::CustomLegacyController,
-    std::optional<Variable>({
-        "SecurityProfile",
+        "ReportClearedErrors",
     }),
 };
 } // namespace ControllerComponentVariables
@@ -1547,6 +1559,7 @@ ComponentVariable get_component_variable(const std::int32_t evse_id, const Varia
 namespace DERComponentVariables {
 
 const Variable Available = {"Available"};
+const Variable Enabled = {"Enabled"};
 const Variable ModesSupported = {"ModesSupported"};
 
 ComponentVariable get_dc_component_variable(const std::int32_t evse_id, const Variable& variable) {
@@ -1607,7 +1620,6 @@ const std::vector<RequiredComponentVariable> required_variables{
     ControllerComponentVariables::SampledDataTxStartedMeasurands,
     ControllerComponentVariables::SampledDataTxUpdatedMeasurands,
     ControllerComponentVariables::SampledDataTxUpdatedInterval,
-    ControllerComponentVariables::ChargePointId,
     ControllerComponentVariables::NetworkConnectionProfiles,
     ControllerComponentVariables::ChargeBoxSerialNumber,
     ControllerComponentVariables::ChargePointModel,
@@ -1699,6 +1711,7 @@ const Variable CsmsRootCertificateHashAlgorithm = {"CsmsRootCertificateHashAlgor
 const Variable CsmsRootCertificateIssuerKeyHash = {"CsmsRootCertificateIssuerKeyHash"};
 const Variable CsmsRootCertificateIssuerNameHash = {"CsmsRootCertificateIssuerNameHash"};
 const Variable CsmsRootCertificateSerialNumber = {"CsmsRootCertificateSerialNumber"};
+const Variable HostName = {"HostName"};
 
 ComponentVariable get_component_variable(const std::int32_t slot, const Variable& variable) {
     Component component;

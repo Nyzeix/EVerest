@@ -49,7 +49,8 @@ enum class TokenHandlingResult {
     USED_TO_STOP_TRANSACTION,
     TIMEOUT,
     NO_CONNECTOR_AVAILABLE,
-    WITHDRAWN
+    WITHDRAWN,
+    USED_TO_REAUTHORIZE
 };
 
 namespace conversions {
@@ -66,7 +67,7 @@ class AuthHandler {
 public:
     AuthHandler(const SelectionAlgorithm& selection_algorithm, const int connection_timeout,
                 bool plug_in_timeout_enabled, bool prioritize_authorization_over_stopping_transaction,
-                bool ignore_connector_faults, const std::string& id, kvsIntf* store);
+                bool ignore_connector_faults, bool stop_transaction_on_reswipe, const std::string& id, kvsIntf* store);
     virtual ~AuthHandler();
 
     /**
@@ -200,6 +201,13 @@ public:
     void set_prioritize_authorization_over_stopping_transaction(bool b);
 
     /**
+     * @brief Set the stop transaction on reswipe flag of the handler.
+     *
+     * @param stop_transaction_on_reswipe
+     */
+    void set_stop_transaction_on_reswipe(bool stop_transaction_on_reswipe);
+
+    /**
      * @brief Registers the given \p callback to notify the evse about the processed authorization request.
      *
      * @param callback
@@ -276,6 +284,7 @@ private:
     std::optional<std::string> master_pass_group_id;
     bool prioritize_authorization_over_stopping_transaction;
     bool ignore_faults;
+    bool stop_transaction_on_reswipe;
     ReservationHandler reservation_handler;
 
     std::map<int, std::unique_ptr<EVSEContext>> evses;
@@ -329,7 +338,12 @@ private:
                                  std::unique_lock<std::mutex>& lk);
     bool is_authorization_withdrawn(const std::vector<int>& selected_evses, const IdToken& id_token);
 
-    int get_latest_plugin(const std::vector<int>& evse_ids);
+    /// \brief Returns the referenced evse from \p evse_ids whose EV plugged in first (the earliest plug in still
+    /// pending in the plug in queue), or -1 if none of the referenced evses has a pending plug in.
+    int get_oldest_plugin(const std::vector<int>& evse_ids);
+    /// \brief Returns the referenced evse from \p evse_ids whose EV plugged in most recently, or -1 if none of the
+    /// referenced evses has a pending plug in.
+    int get_last_plugin(const std::vector<int>& evse_ids);
     void notify_evse(int evse_id, const ProvidedIdToken& provided_token, const ValidationResult& validation_result,
                      std::unique_lock<std::mutex>& lk);
     Identifier get_identifier(const ValidationResult& validation_result, const std::string& id_token,

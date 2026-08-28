@@ -3,12 +3,20 @@
 
 #include "tls_connection_test.hpp"
 
+#include <arpa/inet.h>
+#include <condition_variable>
+#include <cstring>
 #include <memory>
 #include <mutex>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <openssl/obj_mac.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <optional>
 #include <poll.h>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
 
 using namespace std::chrono_literals;

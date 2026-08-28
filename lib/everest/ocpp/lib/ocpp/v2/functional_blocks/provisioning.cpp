@@ -555,6 +555,12 @@ void Provisioning::handle_reset_req(Call<ResetRequest> call) {
     }
 
     if (response.status == ResetStatusEnum::Accepted) {
+        if (!call.msg.evseId.has_value()) {
+            // Imminent whole-station reset: suppress auto-reconnect so a CSMS-side close in the
+            // pre-reset window is not redialed (TC_A_10_CS). The socket stays open so a queued
+            // TransactionEvent(Ended, ImmediateReset) can still flush before the reboot.
+            this->context.connectivity_manager.suppress_reconnect();
+        }
         this->reset_callback(call.msg.evseId, ResetEnum::Immediate);
     }
 }
@@ -607,6 +613,14 @@ void Provisioning::handle_variable_changed(const SetVariableData& set_variable_d
         this->context.connectivity_manager.set_websocket_connection_options_without_reconnect();
     }
 
+    if (component_variable == ControllerComponentVariables::WebSocketPingInterval) {
+        // Apply the new ping interval to the live connection directly
+        this->context.connectivity_manager.set_websocket_ping_interval(
+            this->context.device_model.get_value<int>(ControllerComponentVariables::WebSocketPingInterval),
+            this->context.device_model.get_optional_value<int>(ControllerComponentVariables::WebsocketPongTimeout)
+                .value_or(DEFAULT_WEBSOCKET_PONG_TIMEOUT_S));
+    }
+
     if (component_variable == ControllerComponentVariables::MessageAttemptInterval) {
         if (component_variable.variable.has_value()) {
             this->message_queue.update_transaction_message_retry_interval(
@@ -618,6 +632,24 @@ void Provisioning::handle_variable_changed(const SetVariableData& set_variable_d
         if (component_variable.variable.has_value()) {
             this->message_queue.update_transaction_message_attempts(
                 this->context.device_model.get_value<int>(ControllerComponentVariables::MessageAttempts));
+        }
+    }
+
+    if (set_variable_data.component.name == "NetworkConfiguration" and
+        set_variable_data.component.instance.has_value() and
+        set_variable_data.variable.name == NetworkConfigurationComponentVariables::MessageTimeout.name) {
+        // Apply a per-slot MessageTimeout to the live connection when it targets the active slot.
+        // Writes to other slots are picked up on the next connect.
+        try {
+            const std::int32_t slot = std::stoi(set_variable_data.component.instance.value().get());
+            const auto active_slot_opt =
+                this->context.device_model.get_optional_value<int>(ControllerComponentVariables::ActiveNetworkProfile);
+            if (active_slot_opt.has_value() and active_slot_opt.value() == slot) {
+                this->message_queue.update_message_timeout(std::stoi(set_variable_data.attributeValue.get()));
+                this->context.connectivity_manager.set_websocket_connection_options_without_reconnect();
+            }
+        } catch (const std::exception& e) {
+            EVLOG_warning << "Could not apply per-slot MessageTimeout change: " << e.what();
         }
     }
 
@@ -976,11 +1008,12 @@ namespace {
 bool component_variable_change_requires_websocket_option_update_without_reconnect(
     const ComponentVariable& component_variable) {
 
+    // WebSocketPingInterval is handled separately: it is applied directly to the live connection via
+    // set_websocket_ping_interval() rather than only being stored for the next reconnect.
     return component_variable == ControllerComponentVariables::RetryBackOffRandomRange or
            component_variable == ControllerComponentVariables::RetryBackOffRepeatTimes or
            component_variable == ControllerComponentVariables::RetryBackOffWaitMinimum or
-           component_variable == ControllerComponentVariables::NetworkProfileConnectionAttempts or
-           component_variable == ControllerComponentVariables::WebSocketPingInterval;
+           component_variable == ControllerComponentVariables::NetworkProfileConnectionAttempts;
 }
 } // namespace
 } // namespace ocpp::v2

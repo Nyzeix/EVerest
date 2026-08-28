@@ -112,7 +112,7 @@ void energyImpl::clear_request_schedules() {
 
 void energyImpl::ready() {
     hw_caps = mod->get_hw_capabilities();
-    last_powersupply_capabilities = mod->get_powersupply_capabilities();
+    last_powersupply_capabilities = mod->get_powersupply_capabilities_for_hlc();
     clear_request_schedules();
 
     // request energy now
@@ -387,8 +387,19 @@ void energyImpl::handle_enforce_limits(types::energy::EnforcedLimits& value) {
         // EVLOG_info << "Incoming enforce limits" << value;
 
         //   set hardware limit
+        const int active_phasecount = mod->ac_nr_phases_active;
+
+        static bool warning_shown{false};
+        if (active_phasecount == 0) {
+            if (not warning_shown) {
+                EVLOG_warning << "Number of active phases is still uninitialized, skipping limits calculation "
+                                 "while waiting for BSP";
+                warning_shown = true;
+            }
+            return;
+        }
+
         float limit = 0.;
-        int active_phasecount = mod->ac_nr_phases_active;
 
         // apply enforced limits
 
@@ -421,8 +432,10 @@ void energyImpl::handle_enforce_limits(types::energy::EnforcedLimits& value) {
 
         // apply watt limit
         if (value.limits_root_side.total_power_W.has_value()) {
-            mod->mqtt.publish(fmt::format("everest_external/nodered/{}/state/max_watt", mod->config.connector_id),
-                              value.limits_root_side.total_power_W.value().value);
+            if (mod->config.enable_nodered_interface) {
+                mod->mqtt.publish(fmt::format("everest_external/nodered/{}/state/max_watt", mod->config.connector_id),
+                                  value.limits_root_side.total_power_W.value().value);
+            }
             // watt limit converted to current limit
             const float current_limit_power = value.limits_root_side.total_power_W.value().value /
                                               mod->config.ac_nominal_voltage / mod->ac_nr_phases_active;
@@ -531,7 +544,9 @@ void energyImpl::handle_enforce_limits(types::energy::EnforcedLimits& value) {
                 float actual_voltage = ev_info.present_voltage.value_or(0.);
 
                 bool values_changed = true;
-                auto powersupply_capabilities = mod->get_powersupply_capabilities();
+                // Use the HLC view here: these capabilities are turned into limits for the EV below,
+                // so the power meter minimum currents must be included.
+                auto powersupply_capabilities = mod->get_powersupply_capabilities_for_hlc();
 
                 // did the values change since the last call?
                 if (almost_eq(last_enforced_limits_watt, watt_leave_side) and

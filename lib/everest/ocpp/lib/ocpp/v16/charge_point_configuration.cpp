@@ -11,6 +11,7 @@
 
 #include <ocpp/common/schemas.hpp>
 #include <ocpp/common/utils.hpp>
+#include <ocpp/common/websocket/websocket_uri.hpp>
 #include <ocpp/v16/charge_point_configuration.hpp>
 #include <ocpp/v16/types.hpp>
 #include <ocpp/v16/utils.hpp>
@@ -456,6 +457,34 @@ void ChargePointConfiguration::setSupplyVoltage(std::int32_t supply_voltage) {
     }
 }
 
+std::optional<std::int32_t> ChargePointConfiguration::getSwitchSecurityProfileConnectionTimeout() {
+    if (this->config["Internal"].contains("SwitchSecurityProfileConnectionTimeout")) {
+        return this->config["Internal"]["SwitchSecurityProfileConnectionTimeout"];
+    }
+    return std::nullopt;
+}
+
+std::optional<KeyValue> ChargePointConfiguration::getSwitchSecurityProfileConnectionTimeoutKeyValue() {
+    const auto opt_value = this->getSwitchSecurityProfileConnectionTimeout();
+    if (opt_value.has_value()) {
+        KeyValue kv;
+        kv.key = "SwitchSecurityProfileConnectionTimeout";
+        kv.readonly = false;
+        kv.value = std::to_string(opt_value.value());
+        return kv;
+    }
+    return std::nullopt;
+}
+
+void ChargePointConfiguration::setSwitchSecurityProfileConnectionTimeout(
+    std::int32_t switch_security_profile_connection_timeout) {
+    if (this->getSwitchSecurityProfileConnectionTimeout().has_value()) {
+        this->config["Internal"]["SwitchSecurityProfileConnectionTimeout"] = switch_security_profile_connection_timeout;
+        this->setInUserConfig("Internal", "SwitchSecurityProfileConnectionTimeout",
+                              switch_security_profile_connection_timeout);
+    }
+}
+
 std::string ChargePointConfiguration::getSupportedCiphers12() {
     const std::vector<std::string> supported_ciphers = this->config["Internal"]["SupportedCiphers12"];
     return boost::algorithm::join(supported_ciphers, ":");
@@ -505,6 +534,15 @@ bool ChargePointConfiguration::getVerifyCsmsAllowWildcards() {
 void ChargePointConfiguration::setVerifyCsmsAllowWildcards(bool verify_csms_allow_wildcards) {
     this->config["Internal"]["VerifyCsmsAllowWildcards"] = verify_csms_allow_wildcards;
     this->setInUserConfig("Internal", "VerifyCsmsAllowWildcards", verify_csms_allow_wildcards);
+}
+
+bool ChargePointConfiguration::getReportSuspendedEVSEReasonChange() {
+    return this->config["Internal"]["ReportSuspendedEVSEReasonChange"];
+}
+
+void ChargePointConfiguration::setReportSuspendedEVSEReasonChange(bool report_suspended_evse_reason_change) {
+    this->config["Internal"]["ReportSuspendedEVSEReasonChange"] = report_suspended_evse_reason_change;
+    this->setInUserConfig("Internal", "ReportSuspendedEVSEReasonChange", report_suspended_evse_reason_change);
 }
 
 std::string ChargePointConfiguration::getSupportedMeasurands() {
@@ -772,6 +810,14 @@ KeyValue ChargePointConfiguration::getVerifyCsmsAllowWildcardsKeyValue() {
     return kv;
 }
 
+KeyValue ChargePointConfiguration::getReportSuspendedEVSEReasonChangeKeyValue() {
+    KeyValue kv;
+    kv.key = "ReportSuspendedEVSEReasonChange";
+    kv.readonly = false;
+    kv.value.emplace(ocpp::conversions::bool_to_string(this->getReportSuspendedEVSEReasonChange()));
+    return kv;
+}
+
 KeyValue ChargePointConfiguration::getSupportedMeasurandsKeyValue() {
     KeyValue kv;
     kv.key = "SupportedMeasurands";
@@ -968,6 +1014,27 @@ std::optional<KeyValue> ChargePointConfiguration::getQueueAllMessagesKeyValue() 
         queue_all_messages_kv.emplace(kv);
     }
     return queue_all_messages_kv;
+}
+
+std::optional<bool> ChargePointConfiguration::getReportClearedErrors() {
+    std::optional<bool> report_cleared_errors = std::nullopt;
+    if (this->config["Internal"].contains("ReportClearedErrors")) {
+        report_cleared_errors.emplace(this->config["Internal"]["ReportClearedErrors"]);
+    }
+    return report_cleared_errors;
+}
+
+std::optional<KeyValue> ChargePointConfiguration::getReportClearedErrorsKeyValue() {
+    std::optional<KeyValue> report_cleared_errors_kv = std::nullopt;
+    auto report_cleared_errors = this->getReportClearedErrors();
+    if (report_cleared_errors.has_value()) {
+        KeyValue kv;
+        kv.key = "ReportClearedErrors";
+        kv.readonly = true;
+        kv.value.emplace(ocpp::conversions::bool_to_string(report_cleared_errors.value()));
+        report_cleared_errors_kv.emplace(kv);
+    }
+    return report_cleared_errors_kv;
 }
 
 std::optional<std::string> ChargePointConfiguration::getMessageTypesDiscardForQueueing() {
@@ -2354,6 +2421,62 @@ std::optional<KeyValue> ChargePointConfiguration::getAllowChargingProfileWithout
     return allow_opt;
 }
 
+std::optional<bool> ChargePointConfiguration::getRejectRemoteStartTransactionWithoutConnectorId() {
+    std::optional<bool> reject = std::nullopt;
+    if (this->config["Internal"].contains("RejectRemoteStartTransactionWithoutConnectorId")) {
+        reject.emplace(this->config["Internal"]["RejectRemoteStartTransactionWithoutConnectorId"]);
+    }
+    return reject;
+}
+
+void ChargePointConfiguration::setRejectRemoteStartTransactionWithoutConnectorId(bool reject) {
+    if (this->getRejectRemoteStartTransactionWithoutConnectorId() != std::nullopt) {
+        this->config["Internal"]["RejectRemoteStartTransactionWithoutConnectorId"] = reject;
+        this->setInUserConfig("Internal", "RejectRemoteStartTransactionWithoutConnectorId", reject);
+    }
+}
+
+std::optional<KeyValue> ChargePointConfiguration::getRejectRemoteStartTransactionWithoutConnectorIdKeyValue() {
+    std::optional<KeyValue> reject_opt = std::nullopt;
+    auto reject = this->getRejectRemoteStartTransactionWithoutConnectorId();
+    if (reject != std::nullopt) {
+        KeyValue kv;
+        kv.key = "RejectRemoteStartTransactionWithoutConnectorId";
+        kv.readonly = false;
+        kv.value.emplace(ocpp::conversions::bool_to_string(reject.value()));
+        reject_opt.emplace(kv);
+    }
+    return reject_opt;
+}
+
+std::optional<bool> ChargePointConfiguration::getRemoteStartTransactionWithoutConnectorIdFindFirst() {
+    std::optional<bool> find_first = std::nullopt;
+    if (this->config["Internal"].contains("RemoteStartTransactionWithoutConnectorIdFindFirst")) {
+        find_first.emplace(this->config["Internal"]["RemoteStartTransactionWithoutConnectorIdFindFirst"]);
+    }
+    return find_first;
+}
+
+void ChargePointConfiguration::setRemoteStartTransactionWithoutConnectorIdFindFirst(bool find_first) {
+    if (this->getRemoteStartTransactionWithoutConnectorIdFindFirst() != std::nullopt) {
+        this->config["Internal"]["RemoteStartTransactionWithoutConnectorIdFindFirst"] = find_first;
+        this->setInUserConfig("Internal", "RemoteStartTransactionWithoutConnectorIdFindFirst", find_first);
+    }
+}
+
+std::optional<KeyValue> ChargePointConfiguration::getRemoteStartTransactionWithoutConnectorIdFindFirstKeyValue() {
+    std::optional<KeyValue> find_first_opt = std::nullopt;
+    auto find_first = this->getRemoteStartTransactionWithoutConnectorIdFindFirst();
+    if (find_first != std::nullopt) {
+        KeyValue kv;
+        kv.key = "RemoteStartTransactionWithoutConnectorIdFindFirst";
+        kv.readonly = false;
+        kv.value.emplace(ocpp::conversions::bool_to_string(find_first.value()));
+        find_first_opt.emplace(kv);
+    }
+    return find_first_opt;
+}
+
 std::int32_t ChargePointConfiguration::getWaitForStopTransactionsOnResetTimeout() {
     return this->config["Internal"]["WaitForStopTransactionsOnResetTimeout"];
 }
@@ -2442,6 +2565,18 @@ std::optional<std::string> ChargePointConfiguration::getDefaultPriceText(const s
     }
 
     return std::nullopt;
+}
+
+std::optional<json> ChargePointConfiguration::getDefaultPriceText() {
+    std::optional<json> result;
+    try {
+        auto default_price_texts = config["CostAndPrice"]["DefaultPriceText"];
+        if (default_price_texts.is_object()) {
+            result = default_price_texts;
+        }
+    } catch (...) {
+    }
+    return result;
 }
 
 TariffMessage ChargePointConfiguration::getDefaultTariffMessage(bool offline) {
@@ -2929,6 +3064,34 @@ std::optional<std::vector<KeyValue>> ChargePointConfiguration::getAllMeterPublic
     return key_values;
 }
 
+std::optional<std::string> ChargePointConfiguration::getMeterPublicKeysCsl() {
+    std::optional<std::string> result;
+    try {
+        auto meter_public_keys = config["Internal"]["MeterPublicKeys"];
+        if (meter_public_keys.is_array()) {
+            std::vector<std::string> keys;
+            for (const auto& key : meter_public_keys) {
+                keys.push_back(key.get<std::string>());
+            }
+            result = utils::to_csl(keys);
+        }
+    } catch (...) {
+    }
+    return result;
+}
+
+std::optional<json> ChargePointConfiguration::getMeterPublicKeys() {
+    std::optional<json> result;
+    try {
+        auto meter_public_keys = config["Internal"]["MeterPublicKeys"];
+        if (meter_public_keys.is_array()) {
+            result = meter_public_keys;
+        }
+    } catch (...) {
+    }
+    return result;
+}
+
 bool ChargePointConfiguration::setMeterPublicKey(const std::int32_t connector_id, const std::string& public_key_pem) {
     if (connector_id > this->getNumberOfConnectors() or connector_id < 1) {
         EVLOG_warning << "Cannot set MeterPublicKey for connector " << connector_id
@@ -3152,6 +3315,9 @@ std::optional<KeyValue> ChargePointConfiguration::get(const CiString<50>& key) {
     if (key == "SupportedChargingProfilePurposeTypes") {
         return this->getSupportedChargingProfilePurposeTypesKeyValue();
     }
+    if (key == "IFace") {
+        return this->getIFaceKeyValue();
+    }
     if (key == "IgnoredProfilePurposesOffline") {
         return this->getIgnoredProfilePurposesOfflineKeyValue();
     }
@@ -3170,6 +3336,9 @@ std::optional<KeyValue> ChargePointConfiguration::get(const CiString<50>& key) {
     if (key == "SupplyVoltage") {
         return this->getSupplyVoltageKeyValue();
     }
+    if (key == "SwitchSecurityProfileConnectionTimeout") {
+        return this->getSwitchSecurityProfileConnectionTimeoutKeyValue();
+    }
     if (key == "WebsocketPingPayload") {
         return this->getWebsocketPingPayloadKeyValue();
     }
@@ -3184,6 +3353,9 @@ std::optional<KeyValue> ChargePointConfiguration::get(const CiString<50>& key) {
     }
     if (key == "VerifyCsmsAllowWildcards") {
         return this->getVerifyCsmsAllowWildcardsKeyValue();
+    }
+    if (key == "ReportSuspendedEVSEReasonChange") {
+        return this->getReportSuspendedEVSEReasonChangeKeyValue();
     }
     if (key == "OcspRequestInterval") {
         return this->getOcspRequestIntervalKeyValue();
@@ -3203,6 +3375,12 @@ std::optional<KeyValue> ChargePointConfiguration::get(const CiString<50>& key) {
     if (key == "AllowChargingProfileWithoutStartSchedule") {
         return this->getAllowChargingProfileWithoutStartScheduleKeyValue();
     }
+    if (key == "RejectRemoteStartTransactionWithoutConnectorId") {
+        return this->getRejectRemoteStartTransactionWithoutConnectorIdKeyValue();
+    }
+    if (key == "RemoteStartTransactionWithoutConnectorIdFindFirst") {
+        return this->getRemoteStartTransactionWithoutConnectorIdFindFirstKeyValue();
+    }
     if (key == "WaitForStopTransactionsOnResetTimeout") {
         return this->getWaitForStopTransactionsOnResetTimeoutKeyValue();
     }
@@ -3217,6 +3395,9 @@ std::optional<KeyValue> ChargePointConfiguration::get(const CiString<50>& key) {
     }
     if (key == "QueueAllMessages") {
         return this->getQueueAllMessagesKeyValue();
+    }
+    if (key == "ReportClearedErrors") {
+        return this->getReportClearedErrorsKeyValue();
     }
     if (key == "MessageTypesDiscardForQueueing") {
         return this->getMessageTypesDiscardForQueueingKeyValue();
@@ -3791,6 +3972,18 @@ std::optional<ConfigurationStatus> ChargePointConfiguration::set(const CiString<
         } catch (const std::out_of_range& e) {
             return ConfigurationStatus::Rejected;
         }
+    } else if (key == "RetryBackoffRandomRange") {
+        try {
+            auto [valid, retry_backoff_random_range] = is_positive_integer(value.get());
+            if (!valid) {
+                return ConfigurationStatus::Rejected;
+            }
+            this->setRetryBackoffRandomRange(retry_backoff_random_range);
+        } catch (const std::invalid_argument& e) {
+            return ConfigurationStatus::Rejected;
+        } catch (const std::out_of_range& e) {
+            return ConfigurationStatus::Rejected;
+        }
     } else if (key == "WaitForStopTransactionsOnResetTimeout") {
         try {
             auto [valid, wait_for_stop_transactions_on_reset_timeout] = is_positive_integer(value.get());
@@ -3951,9 +4144,31 @@ std::optional<ConfigurationStatus> ChargePointConfiguration::set(const CiString<
         } catch (const std::out_of_range& e) {
             return ConfigurationStatus::Rejected;
         }
+    } else if (key == "SwitchSecurityProfileConnectionTimeout") {
+        if (not this->getSwitchSecurityProfileConnectionTimeout().has_value()) {
+            return ConfigurationStatus::NotSupported;
+        }
+        try {
+            const auto [valid, _value] = is_positive_integer(value.get());
+            // The schema declares minimum 1
+            if (not valid or _value < 1) {
+                return ConfigurationStatus::Rejected;
+            }
+            this->setSwitchSecurityProfileConnectionTimeout(_value);
+        } catch (const std::invalid_argument& e) {
+            return ConfigurationStatus::Rejected;
+        } catch (const std::out_of_range& e) {
+            return ConfigurationStatus::Rejected;
+        }
     } else if (key == "VerifyCsmsAllowWildcards") {
         if (isBool(value.get())) {
             this->setVerifyCsmsAllowWildcards(ocpp::conversions::string_to_bool(value.get()));
+        } else {
+            return ConfigurationStatus::Rejected;
+        }
+    } else if (key == "ReportSuspendedEVSEReasonChange") {
+        if (isBool(value.get())) {
+            this->setReportSuspendedEVSEReasonChange(ocpp::conversions::string_to_bool(value.get()));
         } else {
             return ConfigurationStatus::Rejected;
         }
@@ -4005,6 +4220,24 @@ std::optional<ConfigurationStatus> ChargePointConfiguration::set(const CiString<
         }
         if (isBool(value.get())) {
             this->setAllowChargingProfileWithoutStartSchedule(ocpp::conversions::string_to_bool(value.get()));
+        } else {
+            return ConfigurationStatus::Rejected;
+        }
+    } else if (key == "RejectRemoteStartTransactionWithoutConnectorId") {
+        if (!this->getRejectRemoteStartTransactionWithoutConnectorId().has_value()) {
+            return ConfigurationStatus::NotSupported;
+        }
+        if (isBool(value.get())) {
+            this->setRejectRemoteStartTransactionWithoutConnectorId(ocpp::conversions::string_to_bool(value.get()));
+        } else {
+            return ConfigurationStatus::Rejected;
+        }
+    } else if (key == "RemoteStartTransactionWithoutConnectorIdFindFirst") {
+        if (!this->getRemoteStartTransactionWithoutConnectorIdFindFirst().has_value()) {
+            return ConfigurationStatus::NotSupported;
+        }
+        if (isBool(value.get())) {
+            this->setRemoteStartTransactionWithoutConnectorIdFindFirst(ocpp::conversions::string_to_bool(value.get()));
         } else {
             return ConfigurationStatus::Rejected;
         }

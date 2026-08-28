@@ -89,7 +89,7 @@
       ],
       "description": "Message timeout in seconds",
       "type": "integer",
-      "default": 30
+      "default": 60
     },
     "Identity": {
       "variable_name": "Identity",
@@ -370,7 +370,7 @@
       "characteristics": {
         "supportsMonitoring": false,
         "dataType": "OptionList",
-        "valuesList": "OCPP20,OCPP201,OCPP21"
+        "valuesList": "OCPP16,OCPP20,OCPP201,OCPP21"
       },
       "attributes": [
         {
@@ -443,6 +443,21 @@
         }
       ],
       "description": "Serial number of the CSMS root certificate",
+      "type": "string"
+    },
+    "HostName": {
+      "variable_name": "HostName",
+      "characteristics": {
+        "supportsMonitoring": true,
+        "dataType": "string"
+      },
+      "attributes": [
+        {
+          "type": "Actual",
+          "mutability": "ReadOnly"
+        }
+      ],
+      "description": "Value sent as the User-Host HTTP header during WebSocket connection to the CSMS",
       "type": "string"
     }
   },

@@ -88,6 +88,11 @@ config:
       rejected and logged with the offending NID/OID.
     type: boolean
     default: false
+  publish_telemetry_only_on_change:
+    description: >-
+      Only publish telemetry blocks when values changed.
+    type: boolean
+    default: true
 provides:
   charger:
     interface: ISO15118_charger
@@ -106,6 +111,7 @@ requires:
     interface: ISO15118_vas
     min_connections: 0
     max_connections: 128
+enable_telemetry: true
 metadata:
   license: https://opensource.org/licenses/Apache-2.0
   authors:

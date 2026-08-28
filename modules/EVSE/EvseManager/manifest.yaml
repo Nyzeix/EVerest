@@ -30,6 +30,11 @@ config:
     description: Nominal AC voltage between phase and neutral in Volt
     type: number
     default: 230
+  ac_max_reactive_power:
+    description: Maximum EVSE reactive power in var; passed to the HLC stack as the AC_DER_IEC de-normalization base. 0 means the EVSE has no reactive-power capability.
+    type: number
+    minimum: 0
+    default: 0
   ev_receipt_required:
     description: "Unsupported: request receipt from EV with HLC"
     type: boolean
@@ -120,10 +125,13 @@ config:
   cable_check_enable_imd_self_test_relays_open:
     description: >-
       Enable self testing of IMD at the beginning of cable check where the relays may still be open.
-      The voltage is set by the cable_check_relays_open_voltage_V config option and may differ from the 
+      The voltage is set by the cable_check_relays_open_voltage_V config option and may differ from the
       voltage that is later used to perform the isolation resistance sample.
       cable_check_wait_number_of_imd_measurements needs to be >=1 in this case as no isolation resistance checking
       can be performed at this stage.
+      If both this option and cable_check_enable_imd_self_test are enabled, the selftest is started with
+      relays open, but the result is captured later on, as it would be with the regular selftest sequence.
+      In this case the powersupply will remain active and transition to the regular cable check voltage.
       A self test is required for IEC 61851-23 (2023) compliance.
     type: boolean
     default: false
@@ -297,8 +305,16 @@ config:
     description: >-
       Indicates if the connector lock should be locked in state B. If set to false, connector will remain unlocked in CP state B
       and this violates IEC61851-1:2019 D.6.5 Table D.9 line 4 and should not be used in public environments!
+      This feature is deprecated.
     type: boolean
     default: true
+  unlock_when_deauthorized:
+    description: >-
+      Indicates if the connector lock should be locked in state B/C regardless of if a user authorized. If set to true,
+      connector will remain unlocked in CP state B/C if the relays are open and no user is authorized. This violates
+      IEC61851-1:2019 D.6.5 Table D.9 line 4 and should not be used in public environments!
+    type: boolean
+    default: false
   state_F_after_fault_ms:
     description: >-
       Set state F after any fault that stops charging for the specified time in ms while in Charging mode (CX->F(300ms)->C1/B1).
@@ -430,6 +446,14 @@ config:
       Maximum ampere per second limit for up/down ramping of current in charging loop.
     type: integer
     default: 25
+  enable_nodered_interface:
+    description: >-
+      Enable the external MQTT interface to the Node-RED debug UI (topics below
+      everest_external/nodered/<connector_id>/). This publishes powermeter and state
+      updates and subscribes to UI commands (enable/disable/pause/resume/phase switch).
+      Only needed when the Node-RED simulation/debug UI is used.
+    type: boolean
+    default: false
 provides:
   evse:
     interface: evse_manager

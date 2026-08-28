@@ -4,11 +4,9 @@
 #include <ocpp/common/connectivity_manager.hpp>
 
 #include <fstream>
+#include <mutex>
 
 #include <everest/logging.hpp>
-#include <ocpp/v2/ctrlr_component_variables.hpp>
-#include <ocpp/v2/device_model.hpp>
-#include <ocpp/v2/utils.hpp>
 
 namespace {
 const auto WEBSOCKET_INIT_DELAY = std::chrono::seconds(2);
@@ -21,20 +19,40 @@ constexpr std::int32_t default_network_config_timeout_seconds = 60;
 namespace ocpp {
 
 using NetworkConnectionProfile = ocpp::v2::NetworkConnectionProfile;
-using AttributeEnum = ocpp::v2::AttributeEnum;
-using DeviceModel = ocpp::v2::DeviceModel;
-using DeviceModelAbstract = ocpp::v2::DeviceModelAbstract;
 using OCPPInterfaceEnum = ocpp::v2::OCPPInterfaceEnum;
 using SetNetworkProfileRequest = ocpp::v2::SetNetworkProfileRequest;
-namespace ControllerComponentVariables = ocpp::v2::ControllerComponentVariables;
-namespace ControllerComponents = ocpp::v2::ControllerComponents;
-namespace NetworkConfigurationComponentVariables = ocpp::v2::NetworkConfigurationComponentVariables;
-namespace utils = ocpp::v2::utils;
 
-ConnectivityManager::ConnectivityManager(ocpp::v2::DeviceModelAbstract& device_model,
+std::optional<NextSlotSelection> select_next_network_slot(const std::vector<std::int32_t>& priority_slots,
+                                                          std::int32_t current_slot, int failed_slots_since_success,
+                                                          std::optional<std::int32_t> last_successful_slot,
+                                                          bool in_fallback) {
+    if (priority_slots.empty()) {
+        return std::nullopt;
+    }
+
+    // B10.FR.07: enter fallback once every priority entry has been tried since the last successful
+    // connection, and stay pinned to the last-successful profile while in fallback. The pin is
+    // sticky: a failed dial to the fallback target keeps re-dialing that same slot on the configured
+    // RetryBackOff schedule (OCTT TC_B_49_CS rejects the first fallback attempt on purpose).
+    if (last_successful_slot.has_value() &&
+        (in_fallback || failed_slots_since_success >= static_cast<int>(priority_slots.size()))) {
+        return NextSlotSelection{last_successful_slot.value(), true};
+    }
+
+    // Otherwise advance to the next entry in the priority list, wrapping around.
+    const auto it = std::find(priority_slots.begin(), priority_slots.end(), current_slot);
+    std::size_t next_index = 0;
+    if (it != priority_slots.end()) {
+        const auto current_index = static_cast<std::size_t>(it - priority_slots.begin());
+        next_index = (current_index + 1) % priority_slots.size();
+    }
+    return NextSlotSelection{priority_slots[next_index], false};
+}
+
+ConnectivityManager::ConnectivityManager(ocpp::ConnectivityManagerConfiguration& configuration,
                                          std::shared_ptr<EvseSecurity> evse_security, const fs::path& share_path) :
-    device_model{device_model},
-    evse_security{evse_security},
+    configuration{configuration},
+    evse_security{std::move(evse_security)},
     share_path{share_path},
     websocket{nullptr},
     message_callback([](const std::string& message) {
@@ -43,6 +61,13 @@ ConnectivityManager::ConnectivityManager(ocpp::v2::DeviceModelAbstract& device_m
     wants_to_be_connected{false},
     connected_ocpp_version{OcppProtocolVersion::Unknown} {
     cache_network_connection_profiles();
+    // Seed the B10.FR.07 fallback target from the persisted active network profile so a fallback
+    // can happen after a reboot, when the last successful connection was made in a prior process
+    // lifetime. Reuses the already-persisted OCPPCommCtrlr.ActiveNetworkProfile device-model value.
+    if (const auto persisted_slot = this->configuration.get_active_network_profile_slot(); persisted_slot.has_value()) {
+        auto state = this->m_state.handle();
+        state->last_successful_slot = persisted_slot;
+    }
 }
 
 void ConnectivityManager::set_message_callback(const std::function<void(const std::string& message)>& callback) {
@@ -77,6 +102,12 @@ void ConnectivityManager::set_websocket_connection_options_without_reconnect() {
     }
 }
 
+void ConnectivityManager::set_websocket_ping_interval(std::int32_t ping_interval_s, std::int32_t pong_timeout_s) {
+    if (this->websocket != nullptr && this->websocket->is_connected()) {
+        this->websocket->set_websocket_ping_interval(ping_interval_s, pong_timeout_s);
+    }
+}
+
 void ConnectivityManager::set_websocket_connected_callback(WebsocketConnectionCallback callback) {
     this->websocket_connected_callback = callback;
 }
@@ -99,9 +130,7 @@ ConnectivityManager::get_network_connection_profile(const std::int32_t configura
     auto state = this->m_state.handle();
     for (const auto& network_profile : state->cached_profiles) {
         if (network_profile.configurationSlot == configuration_slot) {
-            if (!this->device_model
-                     .get_optional_value<bool>(ControllerComponentVariables::AllowSecurityLevelZeroConnections)
-                     .value_or(false) &&
+            if (!this->configuration.get_allow_security_level_zero_connections() &&
                 network_profile.connectionData.securityProfile ==
                     security::OCPP_1_6_ONLY_UNSECURED_TRANSPORT_WITHOUT_BASIC_AUTHENTICATION) {
                 EVLOG_error << "security_profile 0 not officially allowed in OCPP 2.0.1, skipping profile";
@@ -202,6 +231,23 @@ void ConnectivityManager::disconnect() {
     }
 }
 
+void ConnectivityManager::disarm_connection_callbacks() {
+    std::lock_guard<std::mutex> lock(this->connection_callbacks_mutex);
+    this->connection_callbacks_disarmed = true;
+}
+
+void ConnectivityManager::suppress_reconnect() {
+    // Like disconnect() this clears the connect intent and cancels any pending reconnect timer, but
+    // leaves the live socket open so queued messages can still flush. The websocket's own internal
+    // retry loop reconnects independently on a peer-initiated close, so its suppression flag must
+    // be armed as well (TC_B_45_CS).
+    this->wants_to_be_connected = false;
+    this->websocket_timer.stop();
+    if (this->websocket != nullptr) {
+        this->websocket->suppress_reconnect();
+    }
+}
+
 void ConnectivityManager::confirm_successful_connection() {
     const auto config_slot = this->get_active_network_configuration_slot();
     if (!config_slot.has_value()) {
@@ -211,12 +257,23 @@ void ConnectivityManager::confirm_successful_connection() {
 
     const auto network_connection_profile = this->get_network_connection_profile(config_slot.value());
 
-    if (const auto& security_profile_cv = ControllerComponentVariables::SecurityProfile;
-        security_profile_cv.variable.has_value() and network_connection_profile.has_value()) {
-        this->device_model.set_read_only_value(security_profile_cv.component, security_profile_cv.variable.value(),
-                                               AttributeEnum::Actual,
-                                               std::to_string(network_connection_profile.value().securityProfile),
-                                               VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
+    if (network_connection_profile.has_value()) {
+        this->configuration.set_active_security_profile(network_connection_profile.value().securityProfile,
+                                                        VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
+    }
+
+    // Persist ActiveNetworkProfile on actual success, not at dial time: the persisted value then
+    // means "profile in use", which is also what the B10.FR.07 fallback seed and the B09 readers
+    // (per-slot Identity / MessageTimeout / SetVariables gating) assume.
+    this->configuration.set_active_network_profile_slot(config_slot.value(), VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
+
+    // Remember the slot of the last successful connection (B10.FR.07) and clear the fallback state,
+    // mirroring how the active security profile is remembered above.
+    {
+        auto state = this->m_state.handle();
+        state->last_successful_slot = config_slot.value();
+        state->failed_slots_since_success = 0;
+        state->in_fallback = false;
     }
 
     this->remove_network_connection_profiles_below_actual_security_profile();
@@ -224,11 +281,6 @@ void ConnectivityManager::confirm_successful_connection() {
 }
 
 void ConnectivityManager::try_connect_websocket() {
-    if (this->device_model.get_value<std::string>(ControllerComponentVariables::ChargePointId).find(':') !=
-        std::string::npos) {
-        EVLOG_AND_THROW(std::runtime_error("ChargePointId must not contain \':\'"));
-    }
-
     // Check the cache runtime since security profile might change async
     this->check_cache_for_invalid_security_profiles();
 
@@ -305,13 +357,6 @@ void ConnectivityManager::try_connect_websocket() {
     EVLOG_info << "Open websocket with NetworkConfigurationPriority: " << priority_to_set.value() + 1
                << " which is configurationSlot " << configuration_slot_to_set;
 
-    if (const auto& active_network_profile_cv = ControllerComponentVariables::ActiveNetworkProfile;
-        active_network_profile_cv.variable.has_value()) {
-        this->device_model.set_read_only_value(
-            active_network_profile_cv.component, active_network_profile_cv.variable.value(), AttributeEnum::Actual,
-            std::to_string(configuration_slot_to_set), VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
-    }
-
     if (this->websocket == nullptr) {
         this->websocket = std::make_unique<Websocket>(connection_options.value(), this->evse_security, this->logging);
 
@@ -344,8 +389,7 @@ ConnectivityManager::handle_configure_network_connection_profile_callback(int sl
     std::future<ConfigNetworkResult> config_status =
         this->configure_network_connection_profile_callback.value()(slot, profile);
     const std::int32_t config_timeout =
-        this->device_model.get_optional_value<int>(ControllerComponentVariables::NetworkConfigTimeout)
-            .value_or(default_network_config_timeout_seconds);
+        this->configuration.get_network_config_timeout().value_or(default_network_config_timeout_seconds);
 
     if (config_status.wait_for(std::chrono::seconds(config_timeout)) == std::future_status::ready) {
         return config_status.get();
@@ -405,31 +449,6 @@ void ConnectivityManager::on_charging_station_certificate_changed() {
     }
 }
 
-std::string ConnectivityManager::resolve_identity(const std::int32_t configuration_slot) const {
-    std::string identity_to_use =
-        this->device_model.get_value<std::string>(ControllerComponentVariables::SecurityCtrlrIdentity);
-    const auto slot_identity_cv = NetworkConfigurationComponentVariables::get_component_variable(
-        configuration_slot, NetworkConfigurationComponentVariables::Identity);
-    if (const auto slot_identity = this->device_model.get_optional_value<std::string>(slot_identity_cv);
-        slot_identity.has_value() && !slot_identity->empty()) {
-        identity_to_use = *slot_identity;
-        EVLOG_debug << "Using per-slot Identity for slot " << configuration_slot;
-    }
-    return identity_to_use;
-}
-
-std::optional<std::string>
-ConnectivityManager::resolve_basic_auth_password(const std::int32_t configuration_slot) const {
-    const auto slot_pwd_cv = NetworkConfigurationComponentVariables::get_component_variable(
-        configuration_slot, NetworkConfigurationComponentVariables::BasicAuthPassword);
-    if (const auto slot_pwd = this->device_model.get_optional_value<std::string>(slot_pwd_cv);
-        slot_pwd.has_value() && !slot_pwd->empty()) {
-        EVLOG_debug << "Using per-slot BasicAuthPassword for slot " << configuration_slot;
-        return slot_pwd.value();
-    }
-    return this->device_model.get_optional_value<std::string>(ControllerComponentVariables::BasicAuthPassword);
-}
-
 std::optional<std::string> ConnectivityManager::read_everest_version() const {
     const fs::path version_file_path = this->share_path.parent_path().parent_path() / "version_information.txt";
     if (!fs::exists(version_file_path)) {
@@ -448,60 +467,13 @@ std::optional<std::string> ConnectivityManager::read_everest_version() const {
 
 std::optional<WebsocketConnectionOptions>
 ConnectivityManager::get_ws_connection_options(const std::int32_t configuration_slot) {
-    const auto network_connection_profile_opt = this->get_network_connection_profile(configuration_slot);
-    if (!network_connection_profile_opt.has_value()) {
-        EVLOG_critical << "Could not retrieve NetworkProfile of configurationSlot: " << configuration_slot;
-        throw std::runtime_error("Could not retrieve NetworkProfile");
-    }
-    const auto& network_connection_profile = network_connection_profile_opt.value();
-
-    try {
-        const auto identity_to_use = this->resolve_identity(configuration_slot);
-        auto uri = Uri::parse_and_validate(network_connection_profile.ocppCsmsUrl.get(), identity_to_use,
-                                           network_connection_profile.securityProfile);
-        const auto ocpp_versions = utils::get_ocpp_protocol_versions(
-            this->device_model.get_value<std::string>(ControllerComponentVariables::SupportedOcppVersions));
-        const auto basic_auth_password = this->resolve_basic_auth_password(configuration_slot);
-
-        WebsocketConnectionOptions connection_options{
-            ocpp_versions, uri, network_connection_profile.securityProfile, basic_auth_password,
-            // Always use a minimum of 1 second otherwise each message would timeout immediately
-            std::chrono::seconds(std::max(network_connection_profile.messageTimeout, 1)),
-            this->device_model.get_value<int>(ControllerComponentVariables::RetryBackOffRandomRange),
-            this->device_model.get_value<int>(ControllerComponentVariables::RetryBackOffRepeatTimes),
-            this->device_model.get_value<int>(ControllerComponentVariables::RetryBackOffWaitMinimum),
-            this->device_model.get_value<int>(ControllerComponentVariables::NetworkProfileConnectionAttempts),
-            this->device_model.get_value<std::string>(ControllerComponentVariables::SupportedCiphers12),
-            this->device_model.get_value<std::string>(ControllerComponentVariables::SupportedCiphers13),
-            this->device_model.get_value<int>(ControllerComponentVariables::WebSocketPingInterval),
-            this->device_model.get_optional_value<std::string>(ControllerComponentVariables::WebsocketPingPayload)
-                .value_or("payload"),
-            this->device_model.get_optional_value<int>(ControllerComponentVariables::WebsocketPongTimeout).value_or(5),
-            this->device_model.get_optional_value<bool>(ControllerComponentVariables::UseSslDefaultVerifyPaths)
-                .value_or(true),
-            this->device_model.get_optional_value<bool>(ControllerComponentVariables::AdditionalRootCertificateCheck)
-                .value_or(false),
-            std::nullopt, // hostName
-            this->device_model.get_optional_value<bool>(ControllerComponentVariables::VerifyCsmsCommonName)
-                .value_or(true),
-            this->device_model.get_optional_value<bool>(ControllerComponentVariables::UseTPM).value_or(false),
-            this->device_model.get_optional_value<bool>(ControllerComponentVariables::VerifyCsmsAllowWildcards)
-                .value_or(false),
-            this->device_model.get_optional_value<std::string>(ControllerComponentVariables::IFace),
-            this->device_model.get_optional_value<bool>(ControllerComponentVariables::EnableTLSKeylog).value_or(false),
-            this->device_model.get_optional_value<std::string>(ControllerComponentVariables::TLSKeylogFile)};
-
+    auto opts = this->configuration.get_websocket_connection_options(configuration_slot);
+    if (opts.has_value()) {
         if (auto version = this->read_everest_version(); version.has_value()) {
-            connection_options.everest_version = std::move(*version);
+            opts->everest_version = std::move(*version);
         }
-
-        return connection_options;
-
-    } catch (const std::invalid_argument& e) {
-        EVLOG_error << "Could not configure the connection options: " << e.what();
     }
-
-    return std::nullopt;
+    return opts;
 }
 
 void ConnectivityManager::on_websocket_connected(OcppProtocolVersion protocol) {
@@ -529,32 +501,37 @@ void ConnectivityManager::on_websocket_connected(OcppProtocolVersion protocol) {
             break;
         }
         if (!version_str.empty()) {
-            const auto nc_cv = NetworkConfigurationComponentVariables::get_component_variable(
-                actual_configuration_slot.value(), NetworkConfigurationComponentVariables::OcppVersion);
-            if (nc_cv.variable.has_value()) {
-                this->device_model.set_value(nc_cv.component, nc_cv.variable.value(), AttributeEnum::Actual,
-                                             version_str, VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
-            }
+            this->configuration.set_per_slot_ocpp_version(actual_configuration_slot.value(), version_str,
+                                                          VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
         }
     }
     if (network_connection_profile.has_value()) {
-        this->device_model.set_value(ControllerComponents::SecurityCtrlr,
-                                     NetworkConfigurationComponentVariables::SecurityProfile, AttributeEnum::Actual,
-                                     std::to_string(network_connection_profile->securityProfile),
-                                     VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
+        this->configuration.set_security_ctrl_security_profile(network_connection_profile->securityProfile,
+                                                               VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
         if (network_connection_profile->identity.has_value()) {
-            this->device_model.set_value(ControllerComponents::SecurityCtrlr,
-                                         NetworkConfigurationComponentVariables::Identity, AttributeEnum::Actual,
-                                         network_connection_profile->identity.value(),
-                                         VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
+            this->configuration.set_security_ctrl_identity(network_connection_profile->identity.value(),
+                                                           VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
         }
     }
 
-    if (this->websocket_connected_callback.has_value() and network_connection_profile.has_value()) {
-        this->websocket_connected_callback.value()(actual_configuration_slot.value(),
-                                                   network_connection_profile.value(), this->connected_ocpp_version);
+    {
+        std::lock_guard<std::mutex> lock(this->connection_callbacks_mutex);
+        if (!this->connection_callbacks_disarmed and this->websocket_connected_callback.has_value() and
+            network_connection_profile.has_value()) {
+            this->websocket_connected_callback.value()(
+                actual_configuration_slot.value(), network_connection_profile.value(), this->connected_ocpp_version);
+        }
     }
     this->time_disconnected = std::chrono::time_point<std::chrono::steady_clock>();
+
+    // A successful websocket connection ends the reconnection sequence: reset the OCPP part 4 section 5.3
+    // backoff so the next reconnect (if any) starts again at RetryBackOffWaitMinimum. Mirrors how
+    // WebsocketBase resets its own connection_attempts on connect.
+    {
+        auto state = this->m_state.handle();
+        state->reconnect_attempts = 0;
+        state->reconnect_backoff_ms = 0;
+    }
 }
 
 void ConnectivityManager::mark_disconnected_at_now() {
@@ -572,7 +549,9 @@ void ConnectivityManager::on_websocket_disconnected() {
         this->get_network_connection_profile(actual_configuration_slot.value());
     this->mark_disconnected_at_now();
 
-    if (this->websocket_disconnected_callback.has_value() and network_connection_profile.has_value()) {
+    std::lock_guard<std::mutex> lock(this->connection_callbacks_mutex);
+    if (!this->connection_callbacks_disarmed and this->websocket_disconnected_callback.has_value() and
+        network_connection_profile.has_value()) {
         this->websocket_disconnected_callback.value()(actual_configuration_slot.value(),
                                                       network_connection_profile.value(), this->connected_ocpp_version);
     }
@@ -589,63 +568,143 @@ void ConnectivityManager::on_websocket_stopped_connecting(ocpp::WebsocketCloseRe
     }
 
     if (this->wants_to_be_connected) {
+        // A stopped-connecting event means the active slot exhausted its per-profile attempts, so
+        // the OCPP part 4 section 5.3 backoff between re-dials applies here. A ServiceRestart is an
+        // intentional close, not a failed reconnect, so it does not grow the backoff.
+        std::chrono::milliseconds delay = WEBSOCKET_INIT_DELAY;
+        if (reason != WebsocketCloseReason::ServiceRestart) {
+            const auto current = get_active_network_configuration_slot();
+            if (current.has_value()) {
+                auto state = this->m_state.handle();
+                delay = this->advance_reconnect_backoff(*state, current.value());
+            }
+        }
+
         this->websocket_timer.timeout(
             [this, reason] {
                 if (reason != WebsocketCloseReason::ServiceRestart) {
                     const auto current = get_active_network_configuration_slot();
                     if (current.has_value()) {
-                        const auto next_slot = get_next_configuration_slot(current.value());
-                        if (next_slot.has_value()) {
-                            auto state = this->m_state.handle();
-                            state->pending_configuration_slot = next_slot.value();
+                        auto state = this->m_state.handle();
+                        // Each stopped-connecting event means the active slot exhausted its attempts.
+                        if (!state->in_fallback) {
+                            state->failed_slots_since_success += 1;
+                        }
+                        const auto selection =
+                            select_next_network_slot(state->slots, current.value(), state->failed_slots_since_success,
+                                                     state->last_successful_slot, state->in_fallback);
+                        if (selection.has_value()) {
+                            if (selection->is_fallback) {
+                                EVLOG_info << "All network profiles exhausted, falling back to last successful "
+                                              "configurationSlot "
+                                           << selection->slot;
+                                state->in_fallback = true;
+                                this->ensure_slot_in_working_set(*state, selection->slot);
+                            }
+                            state->pending_configuration_slot = selection->slot;
                         }
                     }
                 }
                 this->try_connect_websocket();
             },
-            WEBSOCKET_INIT_DELAY);
+            delay);
     }
+}
+
+std::chrono::milliseconds ConnectivityManager::advance_reconnect_backoff(NetworkProfileCacheState& state,
+                                                                         std::int32_t slot) {
+    // Combined section 5.3 schedule: two counters cooperate. WebsocketBase runs the backoff for the
+    // per-profile internal retries (up to NetworkProfileConnectionAttempts, its connection_attempts
+    // resets to 1 on each start_connecting). This CM-side counter runs the backoff between the
+    // cross-profile / fallback re-dials that happen after a profile exhausts its internal attempts,
+    // and resets to 0 only on a confirmed successful connection. The intended combined effect is a
+    // monotonically non-decreasing wait across a full reconnection sequence until success.
+    int wait_minimum_s = 0;
+    int repeat_times = 0;
+    int random_range_s = 0;
+    if (const auto opts = this->get_ws_connection_options(slot); opts.has_value()) {
+        wait_minimum_s = opts->retry_backoff_wait_minimum_s;
+        repeat_times = opts->retry_backoff_repeat_times;
+        random_range_s = opts->retry_backoff_random_range_s;
+    }
+
+    // The counter is reset only on a successful connection, not when switching profiles: resetting
+    // per profile switch would let a station cycle profiles and re-dial with no backoff (TC_B_49_CS).
+    state.reconnect_attempts += 1;
+    state.reconnect_backoff_ms = get_reconnect_backoff_ms(state.reconnect_attempts, state.reconnect_backoff_ms,
+                                                          wait_minimum_s, repeat_times, random_range_s);
+
+    return std::max<std::chrono::milliseconds>(WEBSOCKET_INIT_DELAY,
+                                               std::chrono::milliseconds(state.reconnect_backoff_ms));
+}
+
+void ConnectivityManager::ensure_slot_in_working_set(NetworkProfileCacheState& state, std::int32_t slot) {
+    if (std::find(state.slots.begin(), state.slots.end(), slot) != state.slots.end()) {
+        return;
+    }
+    const auto profile = this->configuration.read_network_connection_profile(slot);
+    if (!profile.has_value()) {
+        EVLOG_warning << "Fallback slot " << slot << " has no stored network connection profile";
+        return;
+    }
+    const bool already_cached =
+        std::any_of(state.cached_profiles.begin(), state.cached_profiles.end(),
+                    [slot](const SetNetworkProfileRequest& p) { return p.configurationSlot == slot; });
+    if (!already_cached) {
+        SetNetworkProfileRequest req;
+        req.configurationSlot = slot;
+        req.connectionData = profile.value();
+        state.cached_profiles.push_back(req);
+    }
+    state.slots.push_back(slot);
 }
 
 void ConnectivityManager::append_slot_to_network_configuration_priority_if_absent(const int32_t slot,
                                                                                   const std::string& source) {
-    if (!ControllerComponentVariables::NetworkConfigurationPriority.variable.has_value()) {
-        return;
-    }
-
-    const auto priority_str =
-        this->device_model.get_optional_value<std::string>(ControllerComponentVariables::NetworkConfigurationPriority);
+    const auto priority_str = this->configuration.get_network_configuration_priority();
     const auto slot_str = std::to_string(slot);
     bool slot_found = false;
-    if (priority_str.has_value()) {
-        for (const auto& s : ocpp::split_string(priority_str.value(), ',')) {
-            if (s == slot_str) {
-                slot_found = true;
-                break;
-            }
+    for (const auto& s : ocpp::split_string(priority_str, ',')) {
+        if (s == slot_str) {
+            slot_found = true;
+            break;
         }
     }
     if (!slot_found) {
-        std::string new_priority = priority_str.value_or("");
+        std::string new_priority = priority_str;
         if (!new_priority.empty()) {
             new_priority += ',';
         }
         new_priority += slot_str;
-        this->device_model.set_value(ControllerComponentVariables::NetworkConfigurationPriority.component,
-                                     ControllerComponentVariables::NetworkConfigurationPriority.variable.value(),
-                                     AttributeEnum::Actual, new_priority, source);
+        this->configuration.set_network_configuration_priority(new_priority, source);
     }
 }
 
 void ConnectivityManager::cache_network_connection_profiles() {
     auto state = this->m_state.handle();
+
+    // Capture the slot currently in use (pending attempt, else the active one) so the rebuild can re-derive
+    // its index: a reordered or extended priority list shifts indices, and keeping the raw active_priority
+    // would silently name a different slot (wrong confirms and disconnect/connected slot reporting).
+    std::optional<std::int32_t> before_slot;
+    if (state->pending_configuration_slot.has_value()) {
+        before_slot = state->pending_configuration_slot;
+    } else if (!state->slots.empty()) {
+        const auto idx = static_cast<std::size_t>(std::max<std::int32_t>(state->active_priority, 0));
+        if (idx < state->slots.size()) {
+            before_slot = state->slots[idx];
+        }
+    }
+
     state->cached_profiles.clear();
     state->slots.clear();
+    // The working set is rebuilt here, so any fallback selection derived from the old set is stale.
+    // Reset it (keep last_successful_slot, which survives profile-list changes as the fallback seed).
+    state->in_fallback = false;
+    state->failed_slots_since_success = 0;
 
     // Build profiles and priority-ordered slot list from NetworkConfiguration DM components
-    for (const std::string& str : ocpp::split_string(
-             this->device_model.get_value<std::string>(ControllerComponentVariables::NetworkConfigurationPriority),
-             ',')) {
+    for (const std::string& str : ocpp::split_string(this->configuration.get_network_configuration_priority(), ',')) {
         int slot = 0;
         try {
             slot = std::stoi(str);
@@ -654,8 +713,7 @@ void ConnectivityManager::cache_network_connection_profiles() {
             continue;
         }
         state->slots.push_back(slot);
-        if (const auto profile =
-                NetworkConfigurationComponentVariables::read_profile_from_device_model(this->device_model, slot)) {
+        if (const auto profile = this->configuration.read_network_connection_profile(slot)) {
             SetNetworkProfileRequest req;
             req.configurationSlot = slot;
             req.connectionData = *profile;
@@ -663,12 +721,27 @@ void ConnectivityManager::cache_network_connection_profiles() {
         }
     }
 
-    // Re-clamp active_priority to remain a valid index after rebuild
+    // Remap active_priority to the slot captured above; clamp when that slot is gone from the list.
+    // The recursive mutex allows get_priority_from_configuration_slot to re-acquire the same handle.
     if (state->slots.empty()) {
         state->active_priority = 0;
-    } else if (static_cast<std::size_t>(state->active_priority) >= state->slots.size()) {
-        state->active_priority = static_cast<std::int32_t>(state->slots.size() - 1);
+    } else {
+        std::optional<std::int32_t> remapped_priority;
+        if (before_slot.has_value()) {
+            remapped_priority = this->get_priority_from_configuration_slot(before_slot.value());
+        }
+        if (remapped_priority.has_value()) {
+            state->active_priority = remapped_priority.value();
+        } else if (static_cast<std::size_t>(state->active_priority) >= state->slots.size()) {
+            state->active_priority = static_cast<std::int32_t>(state->slots.size() - 1);
+        }
     }
+
+    // The rebuild resurrects every slot listed in the priority string, including ones previously pruned for an
+    // insufficient security profile. Force the next check_cache_for_invalid_security_profiles() (always run before
+    // an attempt, see try_connect_websocket) to re-prune instead of early-returning on an unchanged level;
+    // otherwise a reload could let a lower-security-profile slot connect and downgrade the confirmed profile.
+    state->last_known_security_level = -1;
 
     this->warn_if_all_security_level_zero_locked(*state);
 }
@@ -677,8 +750,7 @@ void ConnectivityManager::warn_if_all_security_level_zero_locked(const NetworkPr
     if (state.cached_profiles.empty()) {
         return;
     }
-    if (this->device_model.get_optional_value<bool>(ControllerComponentVariables::AllowSecurityLevelZeroConnections)
-            .value_or(false)) {
+    if (this->configuration.get_allow_security_level_zero_connections()) {
         return;
     }
     if (std::none_of(state.cached_profiles.begin(), state.cached_profiles.end(),
@@ -703,8 +775,7 @@ bool ConnectivityManager::set_network_profile(const int32_t slot, const NetworkC
     // B09.FR.18: each slot's per-slot Identity / BasicAuthPassword is independent. Do not inherit
     // from the currently-active slot — when the incoming profile omits a per-slot value, reads on
     // the new slot fall back to SecurityCtrlr globals per B09.FR.16.
-    if (!NetworkConfigurationComponentVariables::write_profile_to_device_model(this->device_model, slot, profile,
-                                                                               source)) {
+    if (!this->configuration.write_network_connection_profile(slot, profile, source)) {
         return false;
     }
 
@@ -719,7 +790,7 @@ bool ConnectivityManager::set_network_profile(const int32_t slot, const NetworkC
 }
 
 void ConnectivityManager::check_cache_for_invalid_security_profiles() {
-    const auto security_level = this->device_model.get_value<int>(ControllerComponentVariables::SecurityProfile);
+    const auto security_level = this->configuration.get_security_profile();
 
     // Single critical section over read-modify-write of state->slots and state->pending_configuration_slot.
     // Splitting the lock between the prune step and the pending-slot reassignment can let another writer
@@ -786,7 +857,7 @@ void ConnectivityManager::check_cache_for_invalid_security_profiles() {
 }
 
 void ConnectivityManager::remove_network_connection_profiles_below_actual_security_profile() {
-    const auto security_level = this->device_model.get_value<int>(ControllerComponentVariables::SecurityProfile);
+    const auto security_level = this->configuration.get_security_profile();
 
     std::vector<int32_t> pruned_slots;
     {
@@ -825,15 +896,10 @@ void ConnectivityManager::remove_network_connection_profiles_below_actual_securi
     // Clear per-slot DM variables to prevent re-injection via SetVariables; done outside the state
     // lock because DeviceModel has its own synchronization.
     for (const int32_t slot : pruned_slots) {
-        NetworkConfigurationComponentVariables::clear_slot_in_device_model(this->device_model, slot);
+        this->configuration.clear_network_connection_profile(slot);
     }
 
     // Rebuild and persist NetworkConfigurationPriority from remaining slots
-    if (!ControllerComponentVariables::NetworkConfigurationPriority.variable.has_value()) {
-        EVLOG_warning << "NetworkConfigurationPriority variable is not set, cannot update network priority";
-        return;
-    }
-
     std::string new_priority;
     {
         auto state = this->m_state.handle();
@@ -845,9 +911,7 @@ void ConnectivityManager::remove_network_connection_profiles_below_actual_securi
         }
     }
 
-    this->device_model.set_value(ControllerComponentVariables::NetworkConfigurationPriority.component,
-                                 ControllerComponentVariables::NetworkConfigurationPriority.variable.value(),
-                                 AttributeEnum::Actual, new_priority, VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
+    this->configuration.set_network_configuration_priority(new_priority, VARIABLE_ATTRIBUTE_VALUE_SOURCE_INTERNAL);
 }
 
 } // namespace ocpp

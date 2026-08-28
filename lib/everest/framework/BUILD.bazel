@@ -151,6 +151,9 @@ cc_binary(
             "src/*.cpp",
             "src/*.hpp",
         ],
+        exclude = [
+            "src/everest-config.cpp",
+        ],
     ),
     cxxopts = ["-std=c++17"],
     visibility = ["//visibility:public"],
@@ -164,7 +167,3 @@ cc_binary(
         "@libcap",
     ],
 )
-
-exports_files([
-    "dependencies.yaml",
-])

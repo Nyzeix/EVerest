@@ -65,11 +65,6 @@ Software over-voltage supervision is always active during DC charging. The confi
 must exceed the negotiated limit before EvseManager raises ``MREC5OverVoltage``.
 Set it to ``0`` to trigger immediately once the threshold is crossed.
 
-Software over-voltage supervision is always active during DC charging. The configuration option
-``internal_over_voltage_duration_ms`` defines for how long the measured DC voltage
-must exceed the negotiated limit before EvseManager raises ``MREC5OverVoltage``.
-Set it to ``0`` to trigger immediately once the threshold is crossed.
-
 Published variables
 ===================
 
@@ -98,6 +93,13 @@ connected. This struct should be used for OCPP and display purposes. It comes
 from the power meter that can be used for billing (DC side on DC, AC side on
 AC). If no powermeter is connected EvseManager will never publish this
 variable.
+
+In DC charge mode, the car side power meter may publish its ``capabilities``
+(minimum measurable currents, e.g. due to calibration law accuracy limits).
+These minimum currents are merged into the DC limits advertised to the EV over
+ISO 15118 (ChargeParameterDiscovery and mid-session limit updates), but they
+never affect internal power supply control such as cable check, precharge or
+setpoint clamping.
 
 
 Charging State Machine
@@ -352,6 +354,23 @@ freedom to make the choice in this case.
 Take care especially with the power(watt) and time based hysteresis settings. They should be adjusted to the
 actual use case to avoid relays wearing due too a lot of switching cycles. Consider also to limit the maximum
 number of switching cycles per charging session.
+
+DER (grid support) advertising
+==============================
+
+EvseManager exposes a ``set_der_available`` command that records, per EVSE, whether DER directive support
+(a ``grid_support`` provider) is wired for that EVSE. This is a boot-time fact asserted by whichever module
+provides the ``grid_support`` connection (the OCPP module is one such provider, asserting it from the presence
+of a ``grid_support`` connection); the EV's runtime DER capability is never sent here.
+
+When DER is available and the EVSE is export-capable (its hardware capabilities report a non-zero export
+current and at least one export phase), EvseManager folds the ISO 15118-20 ``AC_DER_IEC`` energy transfer mode
+into the set it advertises, alongside ``AC_BPT`` (advertised whenever ``supported_iso_ac_bpt`` is set and the
+EVSE is export-capable). ISO 15118-20 has no combined ``AC_BPT_DER`` service category, so "AC_BPT_DER supported"
+is conveyed by advertising both ``AC_BPT`` and ``AC_DER_IEC`` as separate energy transfer modes; the EV selects
+one per session.
+
+The command returns ``NoHlc`` when no HLC is enabled for the EVSE (and does nothing), and ``Accepted`` otherwise.
 
 Error Handling
 ==============

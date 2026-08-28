@@ -46,6 +46,7 @@ Charger::Charger(const std::unique_ptr<IECStateMachine>& bsp, const std::unique_
     if (connector_type == types::evse_board_support::Connector_type::IEC62196Type2Socket) {
         shared_context.max_current_cable = bsp->read_pp_ampacity();
     }
+    shared_context.flag_authorized.set_signal([&bsp](bool value) { bsp->set_authorized(value); });
     shared_context.flag_authorized = false;
 
     internal_context.update_pwm_last_duty_cycle = 0.;
@@ -86,6 +87,9 @@ Charger::~Charger() {
     cp_state_F();
     // need to send an event to wake up processing
     error_handling_event_queue.push(ErrorHandlingEvents::ForceEmergencyShutdown);
+    // The event above may already be consumed when stop() sets the exit signal below, leaving
+    // the error thread blocked in wait() forever with stop() never joining it.
+    error_handling_event_queue.stop();
     error_thread_handle.stop();
 }
 
@@ -119,9 +123,7 @@ void Charger::main_thread() {
 
 void Charger::error_thread() {
     for (;;) {
-        if (error_thread_handle.shouldExit()) {
-            break;
-        }
+        // blocks until an event is pushed or the queue is stopped
         auto events = error_handling_event_queue.wait();
         if (!events.empty()) {
             Everest::scoped_lock_timeout lock(state_machine_mutex, Everest::MutexDescription::Charger_signal_loop);
@@ -145,6 +147,12 @@ void Charger::error_thread() {
                     break;
                 }
             }
+        }
+
+        // checked after processing so events queued before the shutdown are still handled, and
+        // via is_stopped() too because shouldExit() may still be false when wait() is re-entered
+        if (error_thread_handle.shouldExit() or error_handling_event_queue.is_stopped()) {
+            break;
         }
     }
 }
@@ -285,7 +293,10 @@ void Charger::run_state_machine() {
                     error_handling->raise_internal_error("Unsupported charging mode.");
                 }
 
-                if (hlc_use_5percent_current_session) {
+                // Skip the SLAC readiness sleep and do not enable 5 percent PWM if the EV is
+                // already unplugged: the checks directly below this initialization will bail
+                // out to Finished in the same state machine pass.
+                if (hlc_use_5percent_current_session and shared_context.flag_ev_plugged_in) {
                     // FIXME: wait for SLAC to be ready. Teslas are really fast with sending the first slac packet after
                     // enabling PWM.
                     std::this_thread::sleep_for(
@@ -583,11 +594,20 @@ void Charger::run_state_machine() {
                     cp_state_X1();
                 }
             }
-            if (time_in_current_state >= config_context.switch_3ph1ph_delay_s * 1000) {
-                session_log.evse(false, "Exit switching phases");
-                bsp->switch_three_phases_while_charging(shared_context.switch_3ph1ph_threephase);
-                shared_context.switch_3ph1ph_threephase_ongoing = false;
-                shared_context.current_state = internal_context.switching_phases_return_state;
+            {
+                const bool fatal_error = stop_charging_on_fatal_error_internal();
+                if (fatal_error or not shared_context.flag_ev_plugged_in or shared_context.flag_disable_requested) {
+                    // Unplug, disable or a fatal error during the switching break. Go back to
+                    // the return state, its checks will tear down the session. The pending
+                    // relay switch is still executed by the generic SwitchPhases cleanup above.
+                    session_log.evse(false, fmt::format("Exit switching phases: {}", stop_reason_flags(fatal_error)));
+                    shared_context.current_state = internal_context.switching_phases_return_state;
+                } else if (time_in_current_state >= config_context.switch_3ph1ph_delay_s * 1000) {
+                    session_log.evse(false, "Exit switching phases");
+                    bsp->switch_three_phases_while_charging(shared_context.switch_3ph1ph_threephase);
+                    shared_context.switch_3ph1ph_threephase_ongoing = false;
+                    shared_context.current_state = internal_context.switching_phases_return_state;
+                }
             }
             break;
 
@@ -596,6 +616,18 @@ void Charger::run_state_machine() {
                 session_log.evse(false, "Enter T_step_EF");
                 internal_context.t_step_ef_x1_pause = false;
                 cp_state_F();
+            }
+            {
+                const bool fatal_error = stop_charging_on_fatal_error_internal();
+                if (fatal_error or not shared_context.flag_ev_plugged_in or shared_context.flag_disable_requested) {
+                    // Unplug, disable or a fatal error during the sequence. Leave state F, but
+                    // do not restore PWM: go back to the return state, its checks will tear
+                    // down the session.
+                    session_log.evse(false, fmt::format("Exit T_step_EF: {}", stop_reason_flags(fatal_error)));
+                    cp_state_X1();
+                    shared_context.current_state = internal_context.t_step_EF_return_state;
+                    break;
+                }
             }
             if (time_in_current_state >= T_STEP_EF + STAY_IN_X1_AFTER_TSTEP_EF_MS) {
                 session_log.evse(false, "Exit T_step_EF");
@@ -621,6 +653,17 @@ void Charger::run_state_machine() {
             if (initialize_state) {
                 session_log.evse(false, "Enter T_step_X1");
                 cp_state_X1();
+            }
+            {
+                const bool fatal_error = stop_charging_on_fatal_error_internal();
+                if (fatal_error or not shared_context.flag_ev_plugged_in or shared_context.flag_disable_requested) {
+                    // Unplug, disable or a fatal error during the sequence. CP is already in
+                    // X1, do not restore PWM: go back to the return state, its checks will
+                    // tear down the session.
+                    session_log.evse(false, fmt::format("Exit T_step_X1: {}", stop_reason_flags(fatal_error)));
+                    shared_context.current_state = internal_context.t_step_X1_return_state;
+                    break;
+                }
             }
             if (time_in_current_state >= T_STEP_X1) {
                 session_log.evse(false, "Exit T_step_X1");
@@ -659,6 +702,7 @@ void Charger::run_state_machine() {
                     shared_context.flag_transaction_active ? "true" : "false",
                     shared_context.flag_ev_plugged_in ? "true" : "false",
                     shared_context.flag_disable_requested ? "true" : "false");
+                session_log.evse(false, fmt::format("Stop in PrepareCharging: {}", stop_reason_flags(fatal_error)));
                 // We started to initialize charging already, so we need to stop via StoppingCharging
                 set_state(EvseState::StoppingCharging);
                 break;
@@ -769,12 +813,22 @@ void Charger::run_state_machine() {
             }
 
             // Stop charging on errors, user stops, pause requests, or disable
-            if (stop_charging_on_fatal_error_internal() or not shared_context.flag_authorized or
-                not shared_context.flag_transaction_active or not shared_context.flag_ev_plugged_in or
-                shared_context.flag_paused_by_evse or not shared_context.iec_allow_close_contactor or
-                shared_context.flag_disable_requested) {
-                set_state(EvseState::StoppingCharging);
-                break;
+            {
+                const bool fatal_error = stop_charging_on_fatal_error_internal();
+                if (fatal_error or not shared_context.flag_authorized or not shared_context.flag_transaction_active or
+                    not shared_context.flag_ev_plugged_in or shared_context.flag_paused_by_evse or
+                    not shared_context.iec_allow_close_contactor or shared_context.flag_disable_requested) {
+                    auto reasons = stop_reason_flags(fatal_error);
+                    if (shared_context.flag_paused_by_evse) {
+                        reasons += "[paused by EVSE]";
+                    }
+                    if (not shared_context.iec_allow_close_contactor) {
+                        reasons += "[IEC stop]";
+                    }
+                    session_log.evse(false, fmt::format("Stop in Charging: {}", reasons));
+                    set_state(EvseState::StoppingCharging);
+                    break;
+                }
             }
 
             if (not power_available()) {
@@ -862,6 +916,7 @@ void Charger::run_state_machine() {
 
             if (not shared_context.flag_transaction_active or not shared_context.flag_authorized or
                 not shared_context.flag_ev_plugged_in or shared_context.flag_disable_requested) {
+                session_log.evse(false, fmt::format("Stop in ChargingPausedEV: {}", stop_reason_flags()));
                 set_state(EvseState::StoppingCharging);
                 break;
             }
@@ -923,6 +978,7 @@ void Charger::run_state_machine() {
 
             if (not shared_context.flag_transaction_active or not shared_context.flag_authorized or
                 not shared_context.flag_ev_plugged_in or shared_context.flag_disable_requested) {
+                session_log.evse(false, fmt::format("Stop in ChargingPausedEVSE: {}", stop_reason_flags()));
                 set_state(EvseState::StoppingCharging);
                 break;
             }
@@ -1374,6 +1430,10 @@ bool Charger::resume_charging() {
 bool Charger::cancel_transaction(const types::evse_manager::StopTransactionRequest& request) {
     Everest::scoped_lock_timeout lock(state_machine_mutex, Everest::MutexDescription::Charger_cancel_transaction);
 
+    EVLOG_info << "Received external request to stop transaction with reason "
+               << types::evse_manager::stop_transaction_reason_to_string(request.reason)
+               << (shared_context.flag_transaction_active ? "" : " (ignored, no transaction active)");
+
     if (shared_context.flag_transaction_active) {
 
         if (shared_context.hlc_charging_active) {
@@ -1424,6 +1484,8 @@ void Charger::stop_session() {
 bool Charger::start_transaction() {
     shared_context.stop_transaction_id_token.reset();
     shared_context.last_stop_transaction_reason.reset();
+    shared_context.start_signed_meter_value.reset();
+    shared_context.stop_signed_meter_value.reset();
 
     types::powermeter::TransactionReq req;
     req.evse_id = evse_id;
@@ -1450,6 +1512,9 @@ bool Charger::start_transaction() {
                     "Failed to start transaction on the power meter");
                 return false;
             }
+        } else if (response.status == types::powermeter::TransactionRequestStatus::OK) {
+            shared_context.start_signed_meter_value = response.signed_meter_value;
+            break;
         }
     }
 
@@ -1476,7 +1541,10 @@ void Charger::stop_transaction() {
             EVLOG_error << "Failed to stop a transaction on the power meter " << response.error.value_or("");
             break;
         } else if (response.status == types::powermeter::TransactionRequestStatus::OK) {
-            shared_context.start_signed_meter_value = response.start_signed_meter_value;
+            // Only update the start_signed_meter_value if we did not already store one on transaction start
+            if (!shared_context.start_signed_meter_value.has_value()) {
+                shared_context.start_signed_meter_value = response.start_signed_meter_value;
+            }
             shared_context.stop_signed_meter_value = response.signed_meter_value;
             break;
         }
@@ -1525,21 +1593,14 @@ void Charger::cleanup_transactions_on_startup() {
     }
 }
 
-std::optional<types::units_signed::SignedMeterValue>
-Charger::take_signed_meter_data(std::optional<types::units_signed::SignedMeterValue>& in) {
-    std::optional<types::units_signed::SignedMeterValue> out;
-    std::swap(out, in);
-    return out;
-}
-
 std::optional<types::units_signed::SignedMeterValue> Charger::get_stop_signed_meter_value() {
     // This is used only inside of the state machine, so we do not need to lock here.
-    return take_signed_meter_data(shared_context.stop_signed_meter_value);
+    return shared_context.stop_signed_meter_value;
 }
 
 std::optional<types::units_signed::SignedMeterValue> Charger::get_start_signed_meter_value() {
     // This is used only inside of the state machine, so we do not need to lock here.
-    return take_signed_meter_data(shared_context.start_signed_meter_value);
+    return shared_context.start_signed_meter_value;
 }
 
 bool Charger::switch_three_phases_while_charging(bool n) {
@@ -2093,6 +2154,28 @@ void Charger::dlink_error() {
 
     shared_context.hlc_allow_close_contactor = false;
 
+    // If the session is being stopped for good (e.g. the transaction was stopped on request
+    // during cable check) or is already over, the D-LINK_ERROR is a consequence of the HLC
+    // session shutting down, not a communication error to recover from. Do not restart matching
+    // in this case as the session can not continue anyway; stop PWM and power instead so the
+    // StoppingCharging state can proceed to Finished once the contactors are open.
+    const bool stopping_for_good = shared_context.current_state == EvseState::StoppingCharging and
+                                   (not shared_context.flag_transaction_active or not shared_context.flag_authorized or
+                                    shared_context.flag_disable_requested);
+    if (stopping_for_good or shared_context.current_state == EvseState::Finished) {
+        session_log.evse(false, "D-LINK_ERROR while the session is stopping or finished: not restarting matching");
+        if (shared_context.pwm_running) {
+            cp_state_X1();
+        }
+
+        if (config_context.charge_mode == ChargeMode::DC) {
+            signal_dc_supply_off();
+        }
+
+        bsp->allow_power_on(false, types::evse_board_support::Reason::PowerOff);
+        return;
+    }
+
     // Is PWM on at the moment?
     if (not shared_context.pwm_running) {
         // [V2G3-M07-04]: With receiving a D-LINK_ERROR.request from HLE in X1 state, the EVSE's
@@ -2251,6 +2334,26 @@ bool Charger::stop_charging_on_fatal_error_internal() {
     internal_context.fatal_error_timer_running = err;
     shared_context.last_shutdown_type = shared_context.shutdown_type;
     return err;
+}
+
+std::string Charger::stop_reason_flags(bool fatal_error) {
+    std::string reasons;
+    if (fatal_error) {
+        reasons += "[fatal error]";
+    }
+    if (not shared_context.flag_authorized) {
+        reasons += "[deauthorized]";
+    }
+    if (not shared_context.flag_transaction_active) {
+        reasons += "[transaction stopped]";
+    }
+    if (not shared_context.flag_ev_plugged_in) {
+        reasons += "[EV unplugged]";
+    }
+    if (shared_context.flag_disable_requested) {
+        reasons += "[disable requested]";
+    }
+    return reasons;
 }
 
 void Charger::emergency_shutdown() {

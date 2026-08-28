@@ -14,10 +14,10 @@
 #include <framework/ModuleAdapter.hpp>
 #include <utils/config/settings.hpp>
 #include <utils/module_config.hpp>
-#include <utils/yaml_loader.hpp>
 
 #include <everest/compile_time_settings.hpp>
 #include <everest/logging.hpp>
+#include <everest/utils/yaml_loader.hpp>
 
 namespace boost::program_options {
 class variables_map; // forward declaration
@@ -84,6 +84,11 @@ inline constexpr auto INTERFACES_DIR = "interfaces";
 inline constexpr auto SCHEMAS_DIR = "schemas";
 inline constexpr auto CONFIG_NAME = "default.yaml";
 inline constexpr auto LOGGING_CONFIG_NAME = "default_logging.cfg";
+inline constexpr auto DB_FILE_NAME = "everest.db";
+// Used when no --db is given: the config database lives in process-private memory (SQLite
+// shared-cache memory databases are never visible to other processes), so the YAML config is
+// re-seeded on every start and nothing is persisted to disk.
+inline constexpr auto IN_MEMORY_DB_URI = "file:everest-config?mode=memory&cache=shared";
 
 inline constexpr auto WWW_DIR = "www";
 
@@ -116,6 +121,7 @@ struct ModuleCallbacks {
     std::function<std::vector<cmd>(const RequirementInitialization& requirement_init)> everest_register;
     std::function<void(ModuleConfigs module_configs, const ModuleInfo& info)> init;
     std::function<void()> ready;
+    std::function<void()> shutdown;
 
     ModuleCallbacks() = default;
 
@@ -123,7 +129,7 @@ struct ModuleCallbacks {
         const std::function<void(ModuleAdapter module_adapter)>& register_module_adapter,
         const std::function<std::vector<cmd>(const RequirementInitialization& requirement_init)>& everest_register,
         const std::function<void(ModuleConfigs module_configs, const ModuleInfo& info)>& init,
-        const std::function<void()>& ready);
+        const std::function<void()>& ready, const std::function<void()>& shutdown = nullptr);
 };
 
 ///\brief Version information
@@ -135,16 +141,16 @@ struct VersionInformation {
 
 class ModuleLoader {
 private:
-    std::unique_ptr<RuntimeSettings> runtime_settings;
-    MQTTSettings mqtt_settings;
-    std::shared_ptr<MQTTAbstraction> mqtt;
-    std::string module_id;
-    std::string original_process_name;
-    std::string application_name;
-    ModuleCallbacks callbacks;
-    VersionInformation version_information;
-    fs::path logging_config_file;
-    bool should_exit = false;
+    std::unique_ptr<RuntimeSettings> m_runtime_settings;
+    MQTTSettings m_mqtt_settings;
+    std::shared_ptr<MQTTAbstraction> m_mqtt;
+    std::string m_module_id;
+    std::string m_original_process_name;
+    std::string m_application_name;
+    ModuleCallbacks m_callbacks;
+    VersionInformation m_version_information;
+    fs::path m_logging_config_file;
+    bool m_should_exit{false};
 
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays): pass-through of argc and argv from main()
     bool parse_command_line(int argc, char* argv[]);

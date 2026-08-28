@@ -2,8 +2,8 @@
 // Copyright 2020 - 2026 Pionix GmbH and Contributors to EVerest
 #include "API.hpp"
 #include <everest/external_energy_limits/external_energy_limits.hpp>
+#include <everest/utils/yaml_loader.hpp>
 #include <utils/date.hpp>
-#include <utils/yaml_loader.hpp>
 
 namespace module {
 
@@ -612,9 +612,9 @@ void API::init() {
     std::string var_ocpp_schedule = this->api_base + "ocpp/var/charging_schedules";
 
     if (this->r_ocpp.size() == 1) {
-        this->r_ocpp.at(0)->subscribe_is_connected([this](bool is_connected) {
+        this->r_ocpp.at(0)->subscribe_connection_status([this](const types::ocpp::ConnectionStatus& connection_status) {
             std::scoped_lock lock(ocpp_data_mutex);
-            if (is_connected) {
+            if (connection_status.connected) {
                 this->ocpp_connection_status = "connected";
             } else {
                 this->ocpp_connection_status = "disconnected";
@@ -758,6 +758,13 @@ void API::ready() {
             std::this_thread::sleep_until(next_tick);
         }
     });
+}
+
+void API::shutdown() {
+    this->running = false;
+    for (auto& api_thread : this->api_threads) {
+        api_thread.join();
+    }
 }
 
 } // namespace module

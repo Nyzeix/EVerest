@@ -758,7 +758,7 @@ TEST(SigalgPinRsa, DoesNotNarrowForNonEcLeaf) {
 //
 // Inspection strategy mirrors the sigalg tests: drive a full TLS 1.2
 // ECDHE-ECDSA handshake over an in-memory BIO pair and read back the group the
-// client observed via SSL_get0_group_name(). That string is the curve the
+// client observed via SSL_get_negotiated_group(). That group is the curve the
 // server actually used for the ServerKeyExchange ECDHE share -- exactly what a
 // strict ISO 15118-2 EV checks against the leaf cert curve before it sends a
 // fatal decode_error.
@@ -776,7 +776,7 @@ using EVP_PKEY_CTX_ptr = std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_fr
 using X509_ptr = std::unique_ptr<X509, decltype(&X509_free)>;
 
 // ISO 15118-2 mandates this TLS 1.2 ECDHE-ECDSA suite, so the key exchange is
-// always an ephemeral EC group and SSL_get0_group_name() is meaningful.
+// always an ephemeral EC group and SSL_get_negotiated_group() is meaningful.
 constexpr auto iso_cipher = "ECDHE-ECDSA-AES128-SHA256";
 
 /// Run a TLS 1.2 ECDHE-ECDSA handshake between a pre-built server CTX and a
@@ -845,7 +845,8 @@ std::string do_handshake_group(SSL_CTX* server_ctx, const char* client_groups) {
         return {};
     }
 
-    const char* group = SSL_get0_group_name(client_ssl.get());
+    const int negotiated_group = static_cast<int>(SSL_get_negotiated_group(client_ssl.get()));
+    const char* group = negotiated_group > 0 ? OBJ_nid2sn(negotiated_group) : nullptr;
     return group != nullptr ? std::string(group) : std::string{};
 }
 

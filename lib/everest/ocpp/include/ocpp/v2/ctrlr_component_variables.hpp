@@ -108,7 +108,6 @@ extern const Variable Fallback;
 // Provides access to standardized variables of OCPP2.0.1 spec
 namespace ControllerComponentVariables {
 extern const ComponentVariable InternalCtrlrEnabled;
-extern const RequiredComponentVariable ChargePointId;
 extern const RequiredComponentVariable NetworkConnectionProfiles;
 extern const RequiredComponentVariable ChargeBoxSerialNumber;
 extern const RequiredComponentVariable ChargePointModel;
@@ -135,11 +134,13 @@ extern const ComponentVariable RoundClockAlignedTimestamps;
 extern const ComponentVariable NetworkConfigTimeout;
 extern const ComponentVariable MaxCompositeScheduleDuration;
 extern const RequiredComponentVariable NumberOfConnectors;
+extern const ComponentVariable ConnectorEvseIds;
 extern const ComponentVariable UseSslDefaultVerifyPaths;
 extern const ComponentVariable VerifyCsmsCommonName;
 extern const ComponentVariable UseTPM;
 extern const ComponentVariable UseTPMSeccLeafCertificate;
 extern const ComponentVariable VerifyCsmsAllowWildcards;
+extern const ComponentVariable ReportSuspendedEVSEReasonChange;
 extern const ComponentVariable IFace;
 extern const ComponentVariable EnableTLSKeylog;
 extern const ComponentVariable TLSKeylogFile;
@@ -156,6 +157,7 @@ extern const ComponentVariable MessageQueueSizeThreshold;
 extern const ComponentVariable MaxMessageSize;
 extern const ComponentVariable ResumeTransactionsOnBoot;
 extern const ComponentVariable AllowSecurityLevelZeroConnections;
+extern const ComponentVariable DeferFirmwareDownloadDuringTransaction;
 extern const RequiredComponentVariable SupportedOcppVersions;
 extern const ComponentVariable AlignedDataCtrlrEnabled;
 extern const ComponentVariable AlignedDataCtrlrAvailable;
@@ -334,10 +336,12 @@ extern const RequiredComponentVariable SupportedFeatureProfiles;
 extern const ComponentVariable SupportedFeatureProfilesMaxLength;
 extern const RequiredComponentVariable UnlockConnectorOnEVSideDisconnect;
 extern const ComponentVariable ReserveConnectorZeroSupported;
-extern const ComponentVariable HostName;
 extern const ComponentVariable AllowChargingProfileWithoutStartSchedule;
 extern const ComponentVariable WaitForStopTransactionsOnResetTimeout;
+extern const ComponentVariable SwitchSecurityProfileConnectionTimeout;
 extern const ComponentVariable StopTransactionIfUnlockNotSupported;
+extern const ComponentVariable RejectRemoteStartTransactionWithoutConnectorId;
+extern const ComponentVariable RemoteStartTransactionWithoutConnectorIdFindFirst;
 extern const ComponentVariable MeterPublicKeys;
 extern const ComponentVariable DisableSecurityEventNotifications;
 extern const ComponentVariable ISO15118CertificateManagementEnabled;
@@ -349,9 +353,7 @@ extern const ComponentVariable SupportedLanguages;
 extern const ComponentVariable CustomMultiLanguageMessages;
 extern const ComponentVariable Language;
 extern const ComponentVariable WaitForSetUserPriceTimeout;
-extern const ComponentVariable AuthorizationKey16;
-extern const RequiredComponentVariable CentralSystemURI16;
-extern const RequiredComponentVariable SecurityProfile16;
+extern const ComponentVariable ReportClearedErrors;
 } // namespace ControllerComponentVariables
 
 namespace EvseComponentVariables {
@@ -443,6 +445,7 @@ extern const Variable CsmsRootCertificateHashAlgorithm;
 extern const Variable CsmsRootCertificateIssuerKeyHash;
 extern const Variable CsmsRootCertificateIssuerNameHash;
 extern const Variable CsmsRootCertificateSerialNumber;
+extern const Variable HostName;
 ComponentVariable get_component_variable(const std::int32_t slot, const Variable& variable);
 std::optional<NetworkConnectionProfile> read_profile_from_device_model(DeviceModelInterface& dm, int32_t slot);
 bool write_profile_to_device_model(DeviceModelInterface& dm, int32_t slot, const NetworkConnectionProfile& profile,
@@ -453,6 +456,7 @@ void clear_slot_in_device_model(DeviceModelInterface& dm, int32_t slot);
 
 namespace DERComponentVariables {
 extern const Variable Available;
+extern const Variable Enabled;
 extern const Variable ModesSupported;
 ComponentVariable get_dc_component_variable(const std::int32_t evse_id, const Variable& variable);
 ComponentVariable get_ac_component_variable(const std::int32_t evse_id, const Variable& variable);

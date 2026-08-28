@@ -13,12 +13,17 @@ target_include_directories(${TEST_TARGET_NAME} PRIVATE
 
 target_sources(${TEST_TARGET_NAME} PRIVATE
     test_config.cpp
+    test_config_service.cpp
+    test_config_service_core.cpp
     test_config_sqlite.cpp
+    test_config_userconfig.cpp
     test_conversions.cpp
+    test_database_migration_files.cpp
     test_filesystem_helpers.cpp
     test_helpers.cpp
     test_message_handler.cpp
     test_message_handler_scaling_policy.cpp
+    test_mqtt_abstraction.cpp
     helpers.cpp
 )
 
@@ -31,10 +36,12 @@ target_compile_definitions(${TEST_TARGET_NAME}
 )
 
 add_subdirectory(controller)
+add_subdirectory(manager)
 
 target_link_libraries(${TEST_TARGET_NAME}
     PRIVATE
         everest::framework
+        everest::io
         everest::log
         everest::sqlite
         Catch2::Catch2WithMain
@@ -88,37 +95,46 @@ setup_test_directory(
 )
 
 setup_test_directory(
-    two_module_test 
-    CONFIG two_modules.yaml 
+    two_module_test
+    CONFIG two_modules.yaml
     MODULES TESTModuleA TESTModuleB
     INTERFACE_FILES test_interface test_interface_cmd_var
+)
+
+setup_test_directory(
+    config_service_test
+    CONFIG config_service_config.yaml
+    MODULES TESTCSTarget TESTValidManifest
+    INTERFACE_FILES test_interface
 )
 
 file(COPY ${PROJECT_SOURCE_DIR}/schemas/migrations
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-evc_include(CodeCoverage)
+if(EVEREST_ENABLE_COVERAGE)
+    evc_include(CodeCoverage)
 
-append_coverage_compiler_flags_to_target(framework)
-append_coverage_compiler_flags_to_target(manager)
-if (EVEREST_ENABLE_ADMIN_PANEL_BACKEND)
-    append_coverage_compiler_flags_to_target(controller)
+    append_coverage_compiler_flags_to_target(framework)
+    append_coverage_compiler_flags_to_target(manager)
+    if (EVEREST_ENABLE_ADMIN_PANEL_BACKEND)
+        append_coverage_compiler_flags_to_target(controller)
+    endif()
+
+    set(GCOVR_ADDITIONAL_ARGS "--gcov-ignore-errors=all")
+    setup_target_for_coverage_gcovr_html(
+        NAME ${PROJECT_NAME}_gcovr_coverage
+        EXECUTABLE ctest --output-on-failure
+        BASE_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        DEPENDENCIES ${PROJECT_NAME}_tests everest::framework
+        EXCLUDE "${CMAKE_BINARY_DIR}/*" "${CPM_SOURCE_CACHE}"
+    )
+
+    setup_target_for_coverage_gcovr_xml(
+        NAME ${PROJECT_NAME}_gcovr_coverage_xml
+        EXECUTABLE ctest --output-on-failure
+        BASE_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        DEPENDENCIES ${PROJECT_NAME}_tests everest::framework
+        EXCLUDE "${CMAKE_BINARY_DIR}/*" "${CPM_SOURCE_CACHE}"
+    )
 endif()
-
-# set(GCOVR_ADDITIONAL_ARGS "--gcov-ignore-errors=all")
-setup_target_for_coverage_gcovr_html(
-    NAME ${PROJECT_NAME}_gcovr_coverage
-    EXECUTABLE ctest --output-on-failure
-    BASE_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    DEPENDENCIES ${PROJECT_NAME}_tests everest::framework
-    EXCLUDE "${CMAKE_BINARY_DIR}/*" "${CPM_SOURCE_CACHE}"
-)
-
-setup_target_for_coverage_gcovr_xml(
-    NAME ${PROJECT_NAME}_gcovr_coverage_xml
-    EXECUTABLE ctest --output-on-failure
-    BASE_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    DEPENDENCIES ${PROJECT_NAME}_tests everest::framework
-    EXCLUDE "${CMAKE_BINARY_DIR}/*" "${CPM_SOURCE_CACHE}"
-)
