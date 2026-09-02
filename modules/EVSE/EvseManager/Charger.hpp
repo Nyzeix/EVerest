@@ -482,7 +482,7 @@ private:
     // after the wake-up sequence.
     static constexpr int STAY_IN_X1_AFTER_TSTEP_EF_MS = 750;
     static constexpr int WAIT_FOR_ENERGY_IN_AUTHLOOP_TIMEOUT_MS = 5000;
-    static constexpr int AC_X1_FALLBACK_TO_NOMINAL_TIMEOUT_MS = 10000;
+    static constexpr int AC_X1_FALLBACK_TO_NOMINAL_TIMEOUT_MS = 15000;
     static constexpr int STOPPING_CHARGING_TIMEOUT_MS = 20000;
     // Ensures apply_new_target_voltage_current() is called at least every DC_ENFORCE_TARGET_LIMITS_INTERVAL_MS
     // during DC charging. This re-applies EVSE limits to the power supply even when the EV does not send
