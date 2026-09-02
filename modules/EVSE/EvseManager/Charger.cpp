@@ -230,6 +230,8 @@ void Charger::run_state_machine() {
                     shared_context.hlc_charging_active = true;
                 }
                 shared_context.hlc_allow_close_contactor = false;
+                shared_context.dlink_ready = false;
+                shared_context.ac_hlc_fallback_timeout_started.reset();
                 shared_context.max_current_cable.reset();
                 shared_context.hlc_charging_terminate_pause = HlcTerminatePause::Unknown;
                 shared_context.legacy_wakeup_done = false;
@@ -266,7 +268,7 @@ void Charger::run_state_machine() {
             if (initialize_state) {
                 internal_context.pp_warning_printed = false;
                 internal_context.no_energy_warning_printed = false;
-                internal_context.ac_x1_fallback_nominal_timeout_running = false;
+                shared_context.ac_hlc_fallback_timeout_started.reset();
                 internal_context.auth_received_printed = false;
 
                 bsp->allow_power_on(false, types::evse_board_support::Reason::PowerOff);
@@ -463,24 +465,15 @@ void Charger::run_state_machine() {
                                             "EIM. Keep 5% enabled to not accidentially kill the ISO session.");
                                         shared_context.current_state = target_state;
                                     } else {
-                                        if (internal_context.ac_x1_fallback_nominal_timeout_running) {
-                                            if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                    std::chrono::steady_clock::now() -
-                                                    internal_context.ac_x1_fallback_nominal_timeout_started)
-                                                    .count() > AC_X1_FALLBACK_TO_NOMINAL_TIMEOUT_MS) {
-                                                session_log.evse(false, "AC mode, HLC enabled(5percent), matching "
-                                                                        "already started. Go through "
-                                                                        "t_step_X1 and disable 5 percent.");
-                                                internal_context.t_step_X1_return_state = target_state;
-                                                internal_context.t_step_X1_return_pwm = 0.;
-                                                internal_context.t_step_EF_return_ampere = 0.;
-                                                hlc_use_5percent_current_session = false;
-                                                shared_context.current_state = EvseState::T_step_X1;
-                                            }
-                                        } else {
-                                            internal_context.ac_x1_fallback_nominal_timeout_running = true;
-                                            internal_context.ac_x1_fallback_nominal_timeout_started =
-                                                std::chrono::steady_clock::now();
+                                        if (ac_hlc_fallback_to_nominal_timeout_reached()) {
+                                            session_log.evse(false, "AC mode, HLC enabled(5percent), matching "
+                                                                    "already started. Go through "
+                                                                    "t_step_X1 and disable 5 percent.");
+                                            internal_context.t_step_X1_return_state = target_state;
+                                            internal_context.t_step_X1_return_pwm = 0.;
+                                            internal_context.t_step_EF_return_ampere = 0.;
+                                            hlc_use_5percent_current_session = false;
+                                            shared_context.current_state = EvseState::T_step_X1;
                                         }
                                     }
                                 } else {
@@ -549,24 +542,16 @@ void Charger::run_state_machine() {
 
                     } else {
                         // AC HLC charging loop not yet started
-                        if (internal_context.ac_x1_fallback_nominal_timeout_running) {
-                            if (std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() -
-                                    internal_context.ac_x1_fallback_nominal_timeout_started)
-                                    .count() > AC_X1_FALLBACK_TO_NOMINAL_TIMEOUT_MS) {
-                                session_log.evse(
-                                    false,
-                                    "AC mode, HLC enabled, PnC authorized, but charging loop did not start. Go through "
-                                    "t_step_EF and disable 5 percent.");
-                                internal_context.t_step_EF_return_state = target_state;
-                                internal_context.t_step_EF_return_pwm = 0.;
-                                internal_context.t_step_EF_return_ampere = 0.;
-                                hlc_use_5percent_current_session = false;
-                                shared_context.current_state = EvseState::T_step_EF;
-                            }
-                        } else {
-                            internal_context.ac_x1_fallback_nominal_timeout_running = true;
-                            internal_context.ac_x1_fallback_nominal_timeout_started = std::chrono::steady_clock::now();
+                        if (ac_hlc_fallback_to_nominal_timeout_reached()) {
+                            session_log.evse(
+                                false,
+                                "AC mode, HLC enabled, PnC authorized, but charging loop did not start. Go through "
+                                "t_step_EF and disable 5 percent.");
+                            internal_context.t_step_EF_return_state = target_state;
+                            internal_context.t_step_EF_return_pwm = 0.;
+                            internal_context.t_step_EF_return_ampere = 0.;
+                            hlc_use_5percent_current_session = false;
+                            shared_context.current_state = EvseState::T_step_EF;
                         }
                     }
 
@@ -2097,6 +2082,37 @@ void Charger::request_error_sequence() {
 void Charger::set_matching_started(bool m) {
     Everest::scoped_lock_timeout lock(state_machine_mutex, Everest::MutexDescription::Charger_set_matching_started);
     shared_context.matching_started = m;
+    if (not m) {
+        shared_context.dlink_ready = false;
+        shared_context.ac_hlc_fallback_timeout_started.reset();
+    }
+}
+
+void Charger::set_dlink_ready(bool ready) {
+    Everest::scoped_lock_timeout lock(state_machine_mutex, Everest::MutexDescription::Charger_set_dlink_ready);
+    if (shared_context.dlink_ready != ready) {
+        shared_context.dlink_ready = ready;
+        shared_context.ac_hlc_fallback_timeout_started.reset();
+    }
+}
+
+bool Charger::ac_hlc_fallback_to_nominal_timeout_reached() {
+    if (not shared_context.dlink_ready) {
+        shared_context.ac_hlc_fallback_timeout_started.reset();
+        return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (not shared_context.ac_hlc_fallback_timeout_started.has_value()) {
+        // Matching can take several seconds. Start the charge-loop grace period only once the data link is ready,
+        // otherwise a valid but slower SLAC/TLS setup can consume most of the timeout before V2G can exchange data.
+        shared_context.ac_hlc_fallback_timeout_started = now;
+        return false;
+    }
+
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now -
+                                                                 shared_context.ac_hlc_fallback_timeout_started.value())
+               .count() > AC_X1_FALLBACK_TO_NOMINAL_TIMEOUT_MS;
 }
 
 void Charger::reset_dc_enforce_target_limits_timer() {

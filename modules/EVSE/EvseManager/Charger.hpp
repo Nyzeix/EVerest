@@ -171,6 +171,7 @@ public:
     void request_error_sequence();
 
     void set_matching_started(bool m);
+    void set_dlink_ready(bool ready);
 
     void notify_currentdemand_started();
     void reset_dc_enforce_target_limits_timer();
@@ -233,6 +234,7 @@ private:
     take_signed_meter_data(std::optional<types::units_signed::SignedMeterValue>& data);
 
     bool stop_charging_on_fatal_error_internal();
+    bool ac_hlc_fallback_to_nominal_timeout_reached();
     std::string stop_reason_flags(bool fatal_error = false);
     float get_max_current_internal();
     float get_max_current_signalled_to_ev_internal();
@@ -329,6 +331,8 @@ private:
         // set to true if auth is from PnC, otherwise to false (EIM)
         bool authorized_pnc;
         bool matching_started;
+        bool dlink_ready{false};
+        std::optional<std::chrono::time_point<std::chrono::steady_clock>> ac_hlc_fallback_timeout_started;
         float max_current;
         std::chrono::time_point<std::chrono::steady_clock> max_current_valid_until;
         std::optional<double> max_current_cable;
@@ -428,8 +432,6 @@ private:
         bool t_step_ef_x1_pause{false};
         bool cp_state_F_active{false};
 
-        bool ac_x1_fallback_nominal_timeout_running{false};
-        std::chrono::time_point<std::chrono::steady_clock> ac_x1_fallback_nominal_timeout_started;
         bool auth_received_printed{false};
 
         bool hlc_charge_loop_no_energy_timeout_running{false};

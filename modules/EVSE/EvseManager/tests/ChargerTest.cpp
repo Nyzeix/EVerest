@@ -763,6 +763,90 @@ TEST_F(ChargerTest, DisableDuringIdle) {
 }
 
 // ----------------------------------------------------------------------------
+// tests for the AC HLC fallback timer
+//
+// The fallback gives an AC vehicle time to enter the ISO 15118 charge loop before switching from 5% PWM to nominal
+// PWM. That grace period must start at D-LINK_READY, not at the beginning of SLAC matching, because matching and the
+// TLS handshake are not part of the application-layer charge-loop response time.
+
+struct ChargerAcHlcFallbackTest : public ChargerTest {
+    std::unique_ptr<evse_board_supportIntf> bsp_if;
+
+    void SetUp() override {
+        charger_bsp = std::make_unique<IECStateMachine>(bsp_if, true, false);
+        ChargerTest::SetUp();
+        charger->setup(false, Charger::ChargeMode::AC, true, true, false, false, 10., 0.5, 10, "X1", 7000, 300, false,
+                       false, 0, utils::SessionIdType::UUID, 300);
+
+        auto& ctx = charger->get_shared_context();
+        ctx.current_state = Charger::EvseState::WaitingForAuthentication;
+        ctx.session_active = true;
+        ctx.flag_ev_plugged_in = true;
+        ctx.flag_authorized = false;
+        ctx.authorized_pnc = false;
+        ctx.flag_transaction_active = false;
+        ctx.matching_started = false;
+        ctx.max_current_cable = 32.;
+        ctx.max_current = 32.;
+        ctx.max_current_valid_until = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+
+        // Enter WaitingForAuthentication before authorization, as in a real plug-in sequence. This keeps 5% PWM
+        // enabled; presenting authorization during state initialization would be treated as authorization before
+        // plug-in and intentionally select nominal PWM instead.
+        charger->run_state_machine();
+        ASSERT_EQ(ctx.current_state, Charger::EvseState::WaitingForAuthentication);
+
+        ctx.flag_authorized = true;
+        ctx.flag_transaction_active = true;
+        ctx.matching_started = true;
+    }
+};
+
+TEST_F(ChargerAcHlcFallbackTest, FallbackTimeoutWaitsForDlinkReady) {
+    auto& ctx = charger->get_shared_context();
+
+    EXPECT_FALSE(ctx.dlink_ready);
+    EXPECT_FALSE(ctx.ac_hlc_fallback_timeout_started.has_value());
+
+    charger->run_state_machine();
+
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::WaitingForAuthentication);
+    EXPECT_FALSE(ctx.ac_hlc_fallback_timeout_started.has_value());
+}
+
+TEST_F(ChargerAcHlcFallbackTest, FallbackTimeoutStartsWhenDlinkIsReady) {
+    auto& ctx = charger->get_shared_context();
+
+    charger->set_dlink_ready(true);
+    charger->run_state_machine();
+
+    ASSERT_TRUE(ctx.ac_hlc_fallback_timeout_started.has_value());
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::WaitingForAuthentication);
+
+    ctx.ac_hlc_fallback_timeout_started = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    charger->run_state_machine();
+
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::T_step_X1);
+}
+
+TEST_F(ChargerAcHlcFallbackTest, HlcChargeLoopCanCloseContactorDuringDlinkAnchoredGracePeriod) {
+    auto& ctx = charger->get_shared_context();
+
+    charger->set_dlink_ready(true);
+    charger->run_state_machine();
+    // The B->C transition can happen shortly before PowerDelivery and has already granted IEC permission.
+    ctx.iec_allow_close_contactor = true;
+    charger->set_hlc_charging_active();
+    charger->set_hlc_allow_close_contactor(true);
+    charger->run_state_machine();
+
+    EXPECT_EQ(ctx.current_state, Charger::EvseState::Charging);
+    EXPECT_TRUE(ctx.iec_allow_close_contactor);
+    EXPECT_TRUE(ctx.hlc_allow_close_contactor);
+    EXPECT_TRUE(charger->get_hlc_use_5percent_current_session());
+}
+
+// ----------------------------------------------------------------------------
 // tests for dlink_error()
 // A D-LINK_ERROR normally restarts SLAC matching via T_step_X1/T_step_EF
 // ([V2G3-M07-05] error recovery). When the session is being stopped for good or
